@@ -1,4 +1,5 @@
 // /app/api/assignments/route.ts
+import { notifyAssignedToTechnician } from "@/lib/notifyAssigned";
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServer"; // sesuai import kamu
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
@@ -607,6 +608,58 @@ export async function POST(req: NextRequest) {
     if (insPaErr) {
       return NextResponse.json({ error: insPaErr.message }, { status: 500 });
     }
+
+    /* ====== ⬇️ Kirim Push Notifikasi (baru ditambahkan) ====== */
+    try {
+      // Ambil semua technician_id unik dari paRows
+      const techIds = Array.from(
+        new Set(
+          paRows
+            .filter((r) => r.technician_id)
+            .map((r) => String(r.technician_id))
+        )
+      );
+
+      // (Opsional) Ambil inisial/kode teknisi (jika tabel punya kolomnya)
+      const initialsById = new Map<string, string>();
+      if (techIds.length) {
+        const { data: techRows } = await supabaseServer
+          .from("technicians")
+          .select("id, inisial, initial, code")
+          .in("id", techIds);
+        for (const t of techRows ?? []) {
+          const ini = (t.inisial ?? t.initial ?? t.code ?? "")
+            ?.toString()
+            ?.toUpperCase();
+          if (ini) initialsById.set(String(t.id), ini);
+        }
+      }
+
+      // Kumpulkan key per project (ID teknisi + inisial bila ada)
+      const keysByProject = new Map<string, Set<string>>();
+      for (const r of paRows) {
+        if (!r.technician_id) continue; // skip baris kendaraan
+        const pid = String(r.project_id);
+        const tid = String(r.technician_id);
+        const set = keysByProject.get(pid) ?? new Set<string>();
+        set.add(tid);
+        const ini = initialsById.get(tid);
+        if (ini) set.add(ini);
+        keysByProject.set(pid, set);
+      }
+
+      // Kirim push per project
+      await Promise.allSettled(
+        Array.from(keysByProject.entries()).map(([pid, set]) =>
+          notifyAssignedToTechnician(Array.from(set), {
+            projectId: pid,
+          })
+        )
+      );
+    } catch (e) {
+      console.warn("[assignments] push notify error:", e);
+    }
+    /* ====== ⬆️ End Push Notifikasi ====== */
   }
 
   return NextResponse.json(

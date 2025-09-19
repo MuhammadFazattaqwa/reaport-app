@@ -1,20 +1,16 @@
 // lib/notifyAssigned.ts
-export async function notifyTechnicianAssigned(technicianId: string, params: {
-  jobId: string;
-  projectName: string;
-  site?: string;
-}) {
-  const url = `${process.env.NEXT_PUBLIC_BASE_URL || ""}/api/push/send`;
-  await fetch(url, {
+export async function notifyAssignedToTechnician(technicianKeys: string[], params: { projectId: string; projectName?: string; site?: string }) {
+  const base = process.env.NEXT_PUBLIC_BASE_URL || "";
+  await fetch(`${base}/api/push/send`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      technicianId,
+      technicianKeys,
       payload: {
         title: "Penugasan baru",
-        body: `Anda ditugaskan pada proyek ${params.projectName}${params.site ? " — " + params.site : ""}`,
-        url: `/user/jobs/${params.jobId}`,
-        data: { jobId: params.jobId, projectName: params.projectName },
+        body: params.projectName ? `Anda ditugaskan pada proyek ${params.projectName}${params.site ? " — " + params.site : ""}` : "Anda mendapat penugasan baru",
+        url: `/user/upload_foto?job=${encodeURIComponent(params.projectId)}`,
+        data: { projectId: params.projectId, projectName: params.projectName },
       },
     }),
   });

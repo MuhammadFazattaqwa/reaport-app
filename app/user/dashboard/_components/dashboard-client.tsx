@@ -3,6 +3,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import EnableNotificationsAuto from "@/components/EnableNotificationsAuto";
 import { Card, CardContent } from "@/components/ui/card";
 import { TechnicianHeader } from "@/components/technician-header";
 import { Pagination } from "@/components/pagination";
