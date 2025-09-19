@@ -1,5 +1,5 @@
 /* public/sw.js — fast offline upload with timeout & ACK (Instalasi + Survey, merged) */
-const VERSION = "magang-app-v1.0.48"; // ⬅️ bump versi agar SW baru aktif
+const VERSION = "magang-app-v1.0.49"; // ⬅️ bump versi agar SW baru aktif
 const STATIC_CACHE = VERSION + "-static";
 const DYNAMIC_CACHE = VERSION + "-dynamic";
 
@@ -434,5 +434,56 @@ self.addEventListener("fetch", (e) => {
         );
       }
     })()
+  );
+});
+
+/* ===== Push Notifications (ADD) =====
+   Handler ini TIDAK mengubah logic lain. 
+   Pastikan payload yang dikirim server berupa JSON:
+   { title: string, body?: string, url?: string, data?: {...} }
+*/
+self.addEventListener("push", (event) => {
+  if (!event.data) return;
+  let payload = {};
+  try {
+    payload = event.data.json();
+  } catch {
+    payload = { title: "Notifikasi", body: event.data.text() };
+  }
+
+  const title = payload.title || "Notifikasi";
+  const options = {
+    body: payload.body || "",
+    icon: "/logo-reaport.png",
+    badge: "/logo-reaport.png",
+    data: {
+      url: payload.url || "/user/dashboard",
+      ...(payload.data || {}),
+    },
+    // vibrate: [120, 80, 120], // opsional
+    // requireInteraction: true, // opsional
+  };
+
+  event.waitUntil(self.registration.showNotification(title, options));
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const targetUrl = event.notification?.data?.url || "/";
+
+  event.waitUntil(
+    self.clients
+      .matchAll({ type: "window", includeUncontrolled: true })
+      .then((clientList) => {
+        for (const client of clientList) {
+          // @ts-ignore types SW
+          if (client.url && client.url.includes(targetUrl) && "focus" in client) {
+            return client.focus();
+          }
+        }
+        if (self.clients.openWindow) {
+          return self.clients.openWindow(targetUrl);
+        }
+      })
   );
 });
