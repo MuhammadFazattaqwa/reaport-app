@@ -3,7 +3,6 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import EnableNotificationsAuto from "@/components/EnableNotificationsAuto";
 import { Card, CardContent } from "@/components/ui/card";
 import { TechnicianHeader } from "@/components/technician-header";
 import { Pagination } from "@/components/pagination";
@@ -11,7 +10,11 @@ import { Star } from "lucide-react";
 import { PWAInstallPrompt } from "@/components/pwa-install-prompt";
 import { createClient } from "@supabase/supabase-js";
 
-/* ===================== Types (UI dari code 1) ===================== */
+/* ==== Tambahan untuk Web Push ==== */
+import { PushSubscriber } from "@/components/PushSubscriber";
+import { Button } from "@/components/ui/button";
+
+/** ===================== Types ===================== **/
 type Job = {
   id: string; // projects.id (uuid)
   job_id: string; // projects.job_id (kode job)
@@ -31,8 +34,12 @@ type Job = {
   sales_name?: string | null;
 
   /** Kendaraan */
-  vehicle_name?: string | null; // single (mis. "Panther (L 1880 ZB)")
-  vehicle_names?: string[]; // multiple (mis. ["Panther (L 1880 ZB)","Grandmax (L 9636 BF)"])
+  vehicle_name?: string | null; // mis. "Panther (L 1880 ZB)"
+  vehicle_names?: string[]; // mis. ["Panther (L 1880 ZB)","Grandmax (L 9636 BF)"]
+
+  /** Progress hitungan item */
+  progressDone?: number | null; // contoh: 1
+  progressTotal?: number | null; // contoh: 50
 };
 
 const supabase = createClient(
@@ -40,28 +47,7 @@ const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 );
 
-/* ===================== Cache lokal (offline) — dari code 2 ===================== */
-const STORAGE_KEY = "dashboard-cache-v1";
-const PROGRESS_KEY = "dashboard-progress-v1";
-
-function loadLocal<T>(key: string): T | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const s = localStorage.getItem(key);
-    return s ? (JSON.parse(s) as T) : null;
-  } catch {
-    return null;
-  }
-}
-function saveLocal<T>(key: string, val: T) {
-  try {
-    localStorage.setItem(key, JSON.stringify(val));
-  } catch {
-    /* ignore */
-  }
-}
-
-/* ===================== Utils ===================== */
+/** ===================== Utils ===================== **/
 function debounce<T extends (...args: any[]) => void>(fn: T, ms = 250) {
   let t: any;
   return (...args: Parameters<T>) => {
@@ -70,84 +56,42 @@ function debounce<T extends (...args: any[]) => void>(fn: T, ms = 250) {
   };
 }
 
-async function getJobProgressOfflineAware(
-  jobId: string
-): Promise<{ percent: number; isPending: boolean }> {
-  // Offline → gunakan cache progres terakhir
-  if (typeof navigator !== "undefined" && !navigator.onLine) {
-    const map =
-      loadLocal<Record<string, { percent: number; isPending: boolean }>>(
-        PROGRESS_KEY
-      ) || {};
-    return map[jobId] ?? { percent: 0, isPending: false };
-  }
-  // Online → fetch API
-  try {
-    const res = await fetch(`/api/job-photos/${encodeURIComponent(jobId)}`, {
-      cache: "no-store",
-    });
-    const json = await res.json();
-    if (!res.ok) throw new Error(json.error || "progress fetch failed");
-    const percent = Number(json?.progress?.percent ?? 0);
-    const isPending = (json?.status as string) === "pending";
-    return { percent, isPending };
-  } catch {
-    // Gagal fetch → fallback cache
-    const map =
-      loadLocal<Record<string, { percent: number; isPending: boolean }>>(
-        PROGRESS_KEY
-      ) || {};
-    return map[jobId] ?? { percent: 0, isPending: false };
-  }
+function toNum(v: any): number | undefined {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
 }
 
-async function attachProgress(items: Job[]): Promise<Job[]> {
-  const enriched = await Promise.all(
-    items.map(async (j) => {
-      const { percent, isPending } = await getJobProgressOfflineAware(j.job_id);
-      const status: Job["status"] =
-        percent >= 100
-          ? "completed"
-          : percent > 0
-          ? "in-progress"
-          : "not-started";
-      return {
-        ...j,
-        progress: percent,
-        isPending,
-        status: isPending ? "in-progress" : status,
-      };
-    })
+/* ==== Tombol uji kirim notifikasi (opsional) ==== */
+function TestPushButton() {
+  const [pending, setPending] = useState(false);
+  return (
+    <Button
+      variant="secondary"
+      size="sm"
+      disabled={pending}
+      onClick={async () => {
+        setPending(true);
+        try {
+          const r = await fetch("/api/push/test", { method: "POST" });
+          if (!r.ok) {
+            const t = await r.text();
+            alert("Gagal mengirim tes: " + t);
+          } else {
+            alert("Tes terkirim. Jika subscription aktif, notifikasi akan muncul.");
+          }
+        } catch (e) {
+          alert("Gagal mengirim tes.");
+        } finally {
+          setPending(false);
+        }
+      }}
+    >
+      Tes Notifikasi
+    </Button>
   );
-
-  // cache progres per job_id untuk offline
-  const progressMap = Object.fromEntries(
-    enriched.map((j) => [
-      j.job_id,
-      { percent: j.progress ?? 0, isPending: !!j.isPending },
-    ])
-  );
-  saveLocal(PROGRESS_KEY, progressMap);
-
-  return enriched;
 }
 
-/* ===================== Auto-mark completed (gaya code 2) ===================== */
-const completedPostedRef = new Set<string>();
-async function markProjectCompleted(projectId: string) {
-  try {
-    await fetch("/api/projects/status", {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ projectId, status: "completed" }),
-    });
-  } catch (e) {
-    completedPostedRef.delete(projectId);
-    console.error("markProjectCompleted failed:", e);
-  }
-}
-
-/* ===================== Page (UI dari code 1 + fungsi code 2) ===================== */
+/** ===================== Page ===================== **/
 export default function TechnicianDashboard() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -159,12 +103,11 @@ export default function TechnicianDashboard() {
   const [currentPage, setCurrentPage] = useState(1);
   const jobsPerPage = 4;
 
-  // segmented filter (all/survey/instalasi) — UI code 1
+  // segmented filter (all/survey/instalasi)
   const [filterType, setFilterType] = useState<"all" | "survey" | "instalasi">(
     "all"
   );
 
-  // Refs supabase channels
   const technicianKeyRef = useRef<string | null>(null);
   const baseChannelRef = useRef<ReturnType<typeof supabase.channel> | null>(
     null
@@ -179,87 +122,122 @@ export default function TechnicianDashboard() {
     typeof supabase.channel
   > | null>(null);
 
-  /* ========== Loader utama (mengikuti pola code 2) ========== */
+  // cegah double PATCH completed
+  const completedPostedRef = useRef<Set<string>>(new Set());
+
+  /** ==== Progress helper (ambil dari /api/job-photos/[jobId]) ==== */
+  async function getJobProgress(jobId: string): Promise<{
+    percent: number;
+    isPending: boolean;
+    done?: number;
+    total?: number;
+  }> {
+    try {
+      const res = await fetch(`/api/job-photos/${encodeURIComponent(jobId)}`, {
+        cache: "no-store",
+      });
+      const json = await res.json();
+      if (!res.ok) throw new Error(json.error || "progress fetch failed");
+
+      // Ambil percent
+      const percent = toNum(json?.progress?.percent) ?? 0;
+
+      // Status pending/active
+      const isPending = String(json?.status || "") === "pending";
+
+      // Robust ambil done/total dari beberapa kemungkinan field:
+      // - progress.done / progress.total (baru)
+      // - progress.complete / progress.total (sebelumnya)
+      // - uploaded / total (top-level, legacy)
+      const done =
+        toNum(json?.progress?.done) ??
+        toNum(json?.progress?.complete) ??
+        toNum(json?.uploaded);
+
+      const total = toNum(json?.progress?.total) ?? toNum(json?.total);
+
+      return { percent, isPending, done, total };
+    } catch {
+      return { percent: 0, isPending: false };
+    }
+  }
+
+  async function attachProgress(items: Job[]): Promise<Job[]> {
+    const enriched = await Promise.all(
+      items.map(async (j) => {
+        const { percent, isPending, done, total } = await getJobProgress(
+          j.job_id
+        );
+
+        const status: Job["status"] =
+          percent >= 100
+            ? "completed"
+            : percent > 0
+            ? "in-progress"
+            : "not-started";
+
+        return {
+          ...j,
+          progress: percent,
+          isPending,
+          status: isPending ? "in-progress" : status,
+          progressDone: typeof done === "number" ? done : null,
+          progressTotal: typeof total === "number" ? total : null,
+        };
+      })
+    );
+    return enriched;
+  }
+
+  /** ==== Tandai project selesai (auto-complete) ==== */
+  async function markProjectCompleted(projectId: string) {
+    try {
+      await fetch("/api/projects/status", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projectId, status: "completed" }),
+      });
+    } catch (e) {
+      completedPostedRef.current.delete(projectId);
+      console.error("markProjectCompleted failed:", e);
+    }
+  }
+
+  /** ==== Loader utama ==== */
+  // ganti bagian loadJobs()
   const loadJobs = async () => {
     try {
       setLoading(true);
       setErr(null);
 
-      const qTech = searchParams.get("technician");
-      const lsCode =
-        typeof window !== "undefined"
-          ? localStorage.getItem("technician_code")
-          : null;
-      const lsId =
-        typeof window !== "undefined"
-          ? localStorage.getItem("technician_id")
-          : null;
-
-      // terima: ?technician= (uuid teknisi ATAU code)
-      const technician = qTech || lsId || lsCode;
-      technicianKeyRef.current = technician;
-
-      const qs = technician
-        ? `?technician=${encodeURIComponent(technician)}`
-        : `?debug=1`;
-
-      // OFFLINE → gunakan cache dashboard jika ada
-      if (typeof navigator !== "undefined" && !navigator.onLine) {
-        const cached = loadLocal<{ items: Job[]; lastUpdated: number }>(
-          STORAGE_KEY
-        );
-        if (cached?.items?.length) {
-          setJobs(cached.items);
-          setLoading(false);
-          return;
-        }
-      }
-
-      // ONLINE → fetch dari API
-      const res = await fetch(`/api/technicians/jobs${qs}`, {
+      const res = await fetch(`/api/technicians/jobs`, {
         cache: "no-store",
+        credentials: "include",
       });
       const json = await res.json();
       if (!res.ok) throw new Error(json.error || "Gagal memuat pekerjaan");
 
-      // Lengkapi progress & pending (offline-aware)
       const withProgress = await attachProgress(json.items ?? []);
-
-      // Simpan ke state dan cache
       setJobs(withProgress);
-      saveLocal(STORAGE_KEY, { items: withProgress, lastUpdated: Date.now() });
 
-      // Auto set completed bila >= 100 dan bukan pending (aman: kita online di cabang ini)
       const candidates = withProgress.filter(
         (j) => (j.progress ?? 0) >= 100 && !j.isPending
       );
       for (const j of candidates) {
-        if (!completedPostedRef.has(j.id)) {
-          completedPostedRef.add(j.id);
+        if (!completedPostedRef.current.has(j.id)) {
+          completedPostedRef.current.add(j.id);
           markProjectCompleted(j.id);
         }
       }
 
-      // Re-subscribe realtime: projects, job_photos, survey_rooms
       const projectIds = (json.items ?? []).map((j: Job) => j.id);
       const jobIds = (json.items ?? []).map((j: Job) => j.job_id);
       resubscribeProjects(projectIds);
       resubscribePhotos(jobIds);
       resubscribeSurveyRooms(projectIds);
     } catch (e: any) {
-      // Gagal fetch → fallback cache jika ada
-      const cached = loadLocal<{ items: Job[]; lastUpdated: number }>(
-        STORAGE_KEY
-      );
-      if (cached?.items) {
-        setJobs(cached.items);
-        setErr(null);
-      } else {
-        setJobs([]);
-        setErr(
-          e?.message || "Gagal memuat pekerjaan (offline & tidak ada cache)"
-        );
-      }
+      setErr(e.message || "Gagal memuat pekerjaan");
+      setJobs([]);
     } finally {
       setLoading(false);
     }
@@ -271,7 +249,7 @@ export default function TechnicianDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
-  /* ========== Realtime Global (projects & assignments) — code 2 ========== */
+  /** ==== Realtime Global (projects & assignments) ==== */
   useEffect(() => {
     const debouncedReload = debounce(loadJobs, 200);
 
@@ -299,7 +277,7 @@ export default function TechnicianDashboard() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  /* ========== Subscribe per daftar aktif — code 2 ========== */
+  /** ==== Re-subscribe (projects) per daftar aktif ==== */
   function resubscribeProjects(projectIds: string[]) {
     if (projectsChannelRef.current) {
       supabase.removeChannel(projectsChannelRef.current);
@@ -329,6 +307,7 @@ export default function TechnicianDashboard() {
     projectsChannelRef.current = ch;
   }
 
+  /** ==== Re-subscribe (job_photos) per daftar aktif ==== */
   function resubscribePhotos(jobIds: string[]) {
     if (photosChannelRef.current) {
       supabase.removeChannel(photosChannelRef.current);
@@ -336,7 +315,7 @@ export default function TechnicianDashboard() {
     }
     if (!jobIds.length) return;
 
-    // job_id text → harus di-quote dan escape
+    // job_id bertipe text → perlu di-quote & escape
     const q = jobIds.map((v) => `"${v.replace(/"/g, '\\"')}"`).join(",");
 
     const ch = supabase
@@ -356,14 +335,15 @@ export default function TechnicianDashboard() {
     photosChannelRef.current = ch;
   }
 
+  /** ==== Re-subscribe (project_survey_rooms) ==== */
   function resubscribeSurveyRooms(projectIds: string[]) {
     if (surveyRoomsChannelRef.current) {
       supabase.removeChannel(surveyRoomsChannelRef.current);
       surveyRoomsChannelRef.current = null;
     }
     if (!projectIds.length) return;
-
     const inList = projectIds.map((x) => `"${x}"`).join(",");
+
     const ch = supabase
       .channel("tech-dashboard-surveyrooms")
       .on(
@@ -381,7 +361,7 @@ export default function TechnicianDashboard() {
     surveyRoomsChannelRef.current = ch;
   }
 
-  /* ========== Filter + Paging (UI dari code 1) ========== */
+  /** ==== Filter + Paging ==== */
   const filteredJobs = useMemo(() => {
     if (filterType === "all") return jobs;
     return jobs.filter((j) => (j.type ?? "instalasi") === filterType);
@@ -394,17 +374,34 @@ export default function TechnicianDashboard() {
   const startIndex = (currentPage - 1) * jobsPerPage;
   const currentJobs = filteredJobs.slice(startIndex, startIndex + jobsPerPage);
 
-  /* ========== UI helpers (UI code 1) ========== */
+  /** ==== UI helpers ==== */
   const getStatusDisplay = (job: Job) => {
+    const hasCount =
+      typeof job.progressDone === "number" &&
+      typeof job.progressTotal === "number";
+
+    const countText = hasCount
+      ? `${job.progressDone}/${job.progressTotal}`
+      : null;
+
     if (job.isPending) {
-      return { text: "Pending", color: "bg-amber-100 text-amber-700" };
+      return {
+        text: "Pending",
+        color: "bg-amber-100 text-amber-700",
+        countText,
+      };
     }
     if ((job.progress ?? 0) >= 100) {
-      return { text: "Selesai", color: "bg-green-100 text-green-700" };
+      return {
+        text: "Selesai",
+        color: "bg-green-100 text-green-700",
+        countText,
+      };
     }
     return {
       text: `${Math.max(0, Math.min(100, Math.round(job.progress ?? 0)))}%`,
       color: "bg-blue-100 text-blue-700",
+      countText,
     };
   };
 
@@ -415,11 +412,8 @@ export default function TechnicianDashboard() {
     return "bg-gray-50 border-gray-200";
   };
 
-  /* ========== Navigasi card (UI code 1) + simpan last_job_id (fungsi code 2) ========== */
+  /** ==== Navigasi card ==== */
   const handleJobClick = (job: Job) => {
-    try {
-      localStorage.setItem("last_job_id", job.job_id);
-    } catch {}
     if (job.type === "survey") {
       router.push(`/user/survey/floors?jobId=${encodeURIComponent(job.id)}`);
     } else {
@@ -427,7 +421,11 @@ export default function TechnicianDashboard() {
     }
   };
 
-  /* ========== Cleanup channels saat unmount ========== */
+  const handlePrevPage = () => setCurrentPage((p) => Math.max(1, p - 1));
+  const handleNextPage = () =>
+    setCurrentPage((p) => Math.min(totalPages, p + 1));
+
+  /** ==== Cleanup ==== */
   useEffect(() => {
     return () => {
       if (projectsChannelRef.current)
@@ -439,10 +437,12 @@ export default function TechnicianDashboard() {
     };
   }, []);
 
-  /* ===================== Render (UI code 1) ===================== */
+  /** ===================== Render ===================== **/
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* Header + segmented filter */}
+      {/* ==== AUTO-SUBSCRIBE WEB PUSH di device teknisi ==== */}
+      <PushSubscriber />
+
       <TechnicianHeader
         title="Reaport"
         showFilter
@@ -451,10 +451,16 @@ export default function TechnicianDashboard() {
           setFilterType(v);
           setCurrentPage(1);
         }}
+        /* Tambahan opsional: tombol tes di kanan header (kalau komponen mendukung slot aksi) */
       />
 
       <main className="p-4">
         <div className="max-w-md mx-auto">
+          {/* Tombol uji kirim notifikasi (opsional / sementara QA) */}
+          <div className="flex justify-end mb-3">
+            <TestPushButton />
+          </div>
+
           {loading ? (
             <div className="text-center text-sm text-gray-600">Memuat...</div>
           ) : err ? (
@@ -522,10 +528,28 @@ export default function TechnicianDashboard() {
                           </div>
 
                           <div className="flex flex-col items-end gap-0.5">
-                            <div
-                              className={`px-2 py-1 rounded-full text-xs font-medium whitespace-nowrap ${badge.color}`}
-                            >
-                              {badge.text}
+                            {/* Badge persentase + Rasio 1/50 */}
+                            <div className="flex items-center gap-1">
+                              <div
+                                className={`px-2 py-1 rounded-full text-xs font-medium whitespace-nowrap ${badge.color}`}
+                                title={
+                                  badge.countText
+                                    ? `Progress ${badge.countText}`
+                                    : undefined
+                                }
+                              >
+                                {badge.text}
+                              </div>
+
+                              {badge.countText && (
+                                <div
+                                  className={`px-2 py-1 rounded-full text-xs font-medium whitespace-nowrap ${badge.color}`}
+                                  aria-label="rasio progress"
+                                  title={`Progress ${badge.countText}`}
+                                >
+                                  {badge.countText}
+                                </div>
+                              )}
                             </div>
 
                             <div className="text-[10px] text-gray-500 font-mono leading-none">
@@ -543,7 +567,7 @@ export default function TechnicianDashboard() {
                               </div>
                             )}
 
-                            {/* Kendaraan: single / multiple */}
+                            {/* Kendaraan */}
                             <div className="text-[10px] text-gray-600 leading-tight text-right mt-0.5">
                               {vehicleList.length === 0 ? (
                                 <div>Kendaraan : -</div>
@@ -583,10 +607,8 @@ export default function TechnicianDashboard() {
                 <Pagination
                   currentPage={currentPage}
                   totalPages={totalPages}
-                  onPrevPage={() => setCurrentPage((p) => Math.max(1, p - 1))}
-                  onNextPage={() =>
-                    setCurrentPage((p) => Math.min(totalPages, p + 1))
-                  }
+                  onPrevPage={handlePrevPage}
+                  onNextPage={handleNextPage}
                 />
               )}
             </>
@@ -594,7 +616,6 @@ export default function TechnicianDashboard() {
         </div>
       </main>
 
-      {/* Prompt PWA */}
       <PWAInstallPrompt />
     </div>
   );
