@@ -10,10 +10,6 @@ import { Star } from "lucide-react";
 import { PWAInstallPrompt } from "@/components/pwa-install-prompt";
 import { createClient } from "@supabase/supabase-js";
 
-/* ==== Tambahan untuk Web Push ==== */
-import { PushSubscriber } from "@/components/PushSubscriber";
-import { Button } from "@/components/ui/button";
-
 /** ===================== Types ===================== **/
 type Job = {
   id: string; // projects.id (uuid)
@@ -59,36 +55,6 @@ function debounce<T extends (...args: any[]) => void>(fn: T, ms = 250) {
 function toNum(v: any): number | undefined {
   const n = Number(v);
   return Number.isFinite(n) ? n : undefined;
-}
-
-/* ==== Tombol uji kirim notifikasi (opsional) ==== */
-function TestPushButton() {
-  const [pending, setPending] = useState(false);
-  return (
-    <Button
-      variant="secondary"
-      size="sm"
-      disabled={pending}
-      onClick={async () => {
-        setPending(true);
-        try {
-          const r = await fetch("/api/push/test", { method: "POST" });
-          if (!r.ok) {
-            const t = await r.text();
-            alert("Gagal mengirim tes: " + t);
-          } else {
-            alert("Tes terkirim. Jika subscription aktif, notifikasi akan muncul.");
-          }
-        } catch (e) {
-          alert("Gagal mengirim tes.");
-        } finally {
-          setPending(false);
-        }
-      }}
-    >
-      Tes Notifikasi
-    </Button>
-  );
 }
 
 /** ===================== Page ===================== **/
@@ -440,9 +406,6 @@ export default function TechnicianDashboard() {
   /** ===================== Render ===================== **/
   return (
     <div className="min-h-screen bg-gray-50">
-      {/* ==== AUTO-SUBSCRIBE WEB PUSH di device teknisi ==== */}
-      <PushSubscriber />
-
       <TechnicianHeader
         title="Reaport"
         showFilter
@@ -451,16 +414,10 @@ export default function TechnicianDashboard() {
           setFilterType(v);
           setCurrentPage(1);
         }}
-        /* Tambahan opsional: tombol tes di kanan header (kalau komponen mendukung slot aksi) */
       />
 
       <main className="p-4">
         <div className="max-w-md mx-auto">
-          {/* Tombol uji kirim notifikasi (opsional / sementara QA) */}
-          <div className="flex justify-end mb-3">
-            <TestPushButton />
-          </div>
-
           {loading ? (
             <div className="text-center text-sm text-gray-600">Memuat...</div>
           ) : err ? (

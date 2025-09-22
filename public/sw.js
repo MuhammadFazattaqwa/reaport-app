@@ -1,21 +1,15 @@
-/* public/sw.js — fast offline upload with timeout & ACK (Merged: code2 + login handling from code1) */
-const VERSION = "magang-app-v1.0.51"; // ⬅️ bump untuk aktifkan SW baru
+/* public/sw.js — fast offline upload with timeout & ACK + Web Push (VAPID) */
+const VERSION = "magang-app-v1.0.52"; // ⬅️ bump versi agar SW baru aktif
 const STATIC_CACHE = VERSION + "-static";
 const DYNAMIC_CACHE = VERSION + "-dynamic";
 
-/* ===== App Shell (gabungan) ===== */
 const APP_SHELL = [
   "/",
   "/user/dashboard",
   "/user/upload_foto",
-  "/user/survey",
-  "/user/survey/room",
-  "/user/survey/floors",
-  "/user/survey/upload",
   "/auth/login",
   "/offline",
   "/manifest.json",
-  "/logo-reaport.png",
   "/icon-192x192.png",
   "/icon-512x512.png",
 ];
@@ -25,10 +19,7 @@ const QUEUE_DB = "photo-upload-queue-db";
 const QUEUE_STORE = "requests";
 const UPLOAD_PATH = "/api/job-photos/upload";
 const META_PATH = "/api/job-photos/meta";
-// 🔥 Survey
-const SURVEY_UPLOAD_PATH = "/api/survey/uploads";
-// const SURVEY_META_PATH = "/api/survey/meta"; // siapkan bila diperlukan
-const UPLOAD_TIMEOUT_MS = 2500; // jika fetch > 2.5s → antre (UI cepat dapat respons)
+const UPLOAD_TIMEOUT_MS = 2500; // ⬅️ kalau fetch > 2.5s → antre, UI langsung dapat respons
 
 /* ===== IndexedDB (queue) ===== */
 function idbOpen() {
@@ -116,6 +107,7 @@ async function processQueue() {
         method: item.method || "POST",
         headers,
         body: item.body || null,
+        // credentials default "same-origin" → cookie ikut untuk same-origin
       });
 
       if (res && res.ok) {
@@ -140,7 +132,8 @@ async function processQueue() {
     }
   }
 
-  if (okIds.length) await notifyClients({ type: "sync-complete", queueIds: okIds });
+  if (okIds.length)
+    await notifyClients({ type: "sync-complete", queueIds: okIds });
 }
 
 /* ===== Cache utils ===== */
@@ -204,7 +197,9 @@ self.addEventListener("activate", (e) => {
       .then((keys) =>
         Promise.all(
           keys.map((k) =>
-            k.startsWith("magang-app-") && k !== STATIC_CACHE && k !== DYNAMIC_CACHE
+            k.startsWith("magang-app-") &&
+            k !== STATIC_CACHE &&
+            k !== DYNAMIC_CACHE
               ? caches.delete(k)
               : Promise.resolve()
           )
@@ -216,9 +211,8 @@ self.addEventListener("activate", (e) => {
 
 /* ===== Background Sync & Messages ===== */
 self.addEventListener("sync", (e) => {
-  if (e.tag === "photo-upload-sync" || e.tag === "meta-sync") {
+  if (e.tag === "photo-upload-sync" || e.tag === "meta-sync")
     e.waitUntil(processQueue());
-  }
 });
 self.addEventListener("message", (e) => {
   if (e.data?.type === "force-sync") {
@@ -237,39 +231,114 @@ self.addEventListener("message", (e) => {
   }
 });
 
+/* ===== Web Push (VAPID) ===== */
+/**
+ * Payload yang dikirim server sebaiknya JSON:
+ * { title: string, body: string, url?: string, tag?: string, data?: any }
+ * - url default diarahkan ke "/user/dashboard"
+ * - tag dipakai agar notifikasi dengan tag yang sama bisa di-merge oleh browser
+ */
+  self.addEventListener("push", (e) => {
+    let data = {};
+    try { data = e.data ? e.data.json() : {}; } catch (_) {}
+
+    const title = data.title || "Magang App";
+    const body = data.body || "Anda mendapat pemberitahuan baru";
+    const url = data.url || "/user/dashboard";
+
+    // Gunakan tag unik (kalau dikirim dari server), fallback ke random per event
+    // sehingga tidak menimpa notifikasi lain.
+    const tag = data.tag || `assign-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    e.waitUntil(
+      self.registration.showNotification(title, {
+        body,
+        tag,
+        icon: "/icon-192x192.png",
+        badge: "/icon-192x192.png",
+        data: { url },
+        renotify: true,           // bunyikan ulang walau tag sama
+        requireInteraction: true, // tahan toast sampai user interaksi (desktop)
+        silent: false,
+        timestamp: Date.now(),    // bantu OS urutkan sebagai notifikasi baru
+      })
+    );
+  });
+
+// Klik notifikasi → fokuskan tab app kalau sudah ada, kalau tidak buka URL
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const url = (event.notification && event.notification.data && event.notification.data.url) || "/user/dashboard";
+
+  event.waitUntil((async () => {
+    const allClients = await clients.matchAll({ type: "window", includeUncontrolled: true });
+
+    // Reuse tab yang sudah membuka app, utamakan yang mengandung path target
+    for (const client of allClients) {
+      try {
+        const hasUrl = typeof client.url === "string" ? client.url.includes(url) : false;
+        if (hasUrl && "focus" in client) {
+          await client.focus();
+          return;
+        }
+      } catch (_) {}
+    }
+
+    // Jika tidak ada, fokuskan tab app manapun
+    for (const client of allClients) {
+      try {
+        if ("focus" in client) {
+          await client.focus();
+          // Optional: navigasikan jika perlu
+          if ("navigate" in client && !client.url.includes(url)) {
+            await client.navigate(url);
+          }
+          return;
+        }
+      } catch (_) {}
+    }
+
+    // Terakhir, buka window baru
+    if (clients.openWindow) {
+      await clients.openWindow(url);
+    }
+  })());
+});
+
+// Opsional: tangkap event subscription berubah (mis. token invalidated)
+// SW tidak punya akses VAPID public key → minta client app untuk re-subscribe
+self.addEventListener("pushsubscriptionchange", (event) => {
+  event.waitUntil((async () => {
+    await notifyClients({ type: "pushsubscriptionchange" });
+  })());
+});
+
 /* ===== Fetch ===== */
 self.addEventListener("fetch", (e) => {
   const req = e.request;
   const url = new URL(req.url);
 
-  // 🔐 BYPASS: semua rute auth → biarkan browser handle (cookie ikut)
-  // (dari code 1, diperluas: bukan hanya callback/confirm, tapi semua /auth/*)
+  // 🛡️ BYPASS: semua rute auth → biarkan browser langsung (cookie ikut)
   if (
     url.origin === self.location.origin &&
-    (
-      url.pathname === "/auth/callback" ||
+    (url.pathname === "/auth/callback" ||
       url.pathname.startsWith("/auth/callback") ||
       url.pathname === "/auth/confirm" ||
       url.pathname.startsWith("/auth/confirm") ||
-      url.pathname.startsWith("/auth/") // ⬅️ penting untuk login & rute auth lain
-    )
+      url.pathname.startsWith("/auth/"))
   ) {
     return; // no intercept
   }
 
   // 🛡️ BYPASS: semua /api/** (agar cookie tidak hilang & tidak dicache),
-  // KECUALI POST ke endpoint yang memang dikelola antrean offline.
+  // kecuali dua endpoint POST yang memang dikelola SW untuk antre offline.
   if (url.origin === self.location.origin && url.pathname.startsWith("/api/")) {
     const isManagedUpload =
       req.method === "POST" &&
-      (
-        url.pathname === UPLOAD_PATH ||
-        url.pathname === META_PATH ||
-        url.pathname === SURVEY_UPLOAD_PATH
-        // || url.pathname === SURVEY_META_PATH
-      );
+      (url.pathname === UPLOAD_PATH || url.pathname === META_PATH);
+
     if (!isManagedUpload) {
-      e.respondWith(fetch(req)); // network only + credentials dari req asli
+      e.respondWith(fetch(req)); // network only, credentials ikut karena pakai req asli
       return;
     }
   }
@@ -277,12 +346,7 @@ self.addEventListener("fetch", (e) => {
   // === Upload & Meta POST (antrian offline) ===
   if (
     req.method === "POST" &&
-    (
-      url.pathname === UPLOAD_PATH ||
-      url.pathname === META_PATH ||
-      url.pathname === SURVEY_UPLOAD_PATH
-      // || url.pathname === SURVEY_META_PATH
-    )
+    (url.pathname === UPLOAD_PATH || url.pathname === META_PATH)
   ) {
     e.respondWith(
       (async () => {
@@ -294,19 +358,16 @@ self.addEventListener("fetch", (e) => {
             ),
           ]);
 
-          // ACK cepat ke client jika upload sukses (Instalasi & Survey)
-          if (
-            url.pathname === UPLOAD_PATH ||
-            url.pathname === SURVEY_UPLOAD_PATH
-          ) {
+          // ACK cepat ke client jika upload sukses
+          if (url.pathname === UPLOAD_PATH) {
             try {
               const resClone = onlineRes.clone();
               const data = await resClone.json().catch(() => null);
-              if (data && (data.ok || data.photoUrl || data.thumbUrl || data.thumb_url)) {
+              if (data && (data.ok || data.photoUrl || data.thumbUrl)) {
                 await notifyClients({
                   type: "upload-online-ack",
                   categoryId: data.categoryId || null,
-                  thumbUrl: data.thumbUrl || data.thumb_url || null,
+                  thumbUrl: data.thumbUrl || null,
                   serialNumber: data.serialNumber || null,
                   meter: typeof data.meter === "number" ? data.meter : null,
                 });
@@ -328,16 +389,11 @@ self.addEventListener("fetch", (e) => {
             headers,
             body,
             createdAt: Date.now(),
-            kind:
-              url.pathname === META_PATH /* || url.pathname === SURVEY_META_PATH */
-                ? "meta"
-                : "upload",
+            kind: url.pathname === META_PATH ? "meta" : "upload",
           });
           try {
             await self.registration.sync.register(
-              url.pathname === META_PATH /* || url.pathname === SURVEY_META_PATH */
-                ? "meta-sync"
-                : "photo-upload-sync"
+              url.pathname === META_PATH ? "meta-sync" : "photo-upload-sync"
             );
           } catch (_) {}
           return new Response(
@@ -398,6 +454,7 @@ self.addEventListener("fetch", (e) => {
       /\.(?:js|css|woff2?|ttf|eot|png|jpg|jpeg|gif|svg|webp|ico)$/i.test(
         url.pathname
       ));
+
   if (isStatic) {
     e.respondWith(
       (async () => {
@@ -416,31 +473,7 @@ self.addEventListener("fetch", (e) => {
     return;
   }
 
-  // 3) API GET (same-origin) → (TIDAK akan terpakai untuk /api/** karena sudah di-bypass di atas)
-  if (url.pathname.startsWith("/api/")) {
-    e.respondWith(
-      (async () => {
-        try {
-          const r = await fetch(req);
-          const copy = r.clone();
-          e.waitUntil(
-            caches.open(DYNAMIC_CACHE).then((c) => putDual(c, req, copy))
-          );
-        } catch {}
-        try {
-          const hit = await caches.match(req, { ignoreSearch: true });
-          if (hit) return hit;
-        } catch {}
-        return new Response(JSON.stringify({ error: "offline" }), {
-          headers: { "Content-Type": "application/json" },
-          status: 503,
-        });
-      })()
-    );
-    return;
-  }
-
-  // 4) Default → network-first; fallback cache
+  // 3) Default → network-first; fallback cache
   e.respondWith(
     (async () => {
       try {
@@ -450,76 +483,6 @@ self.addEventListener("fetch", (e) => {
           (await caches.match(req, { ignoreSearch: true })) || Response.error()
         );
       }
-    })()
-  );
-});
-
-/* ===== Push Notifications (NEW) ===== */
-self.addEventListener("push", (event) => {
-  event.waitUntil(
-    (async () => {
-      let data = {};
-      try {
-        data = event.data ? event.data.json() : {};
-      } catch (_) {
-        try {
-          // fallback: treat as text
-          const t = event.data && event.data.text ? event.data.text() : "";
-          data = { body: t || "Anda mendapat pemberitahuan." };
-        } catch (_) {}
-      }
-
-      const title = data.title || "Penugasan Baru";
-      const body = data.body || "Anda ditugaskan pada sebuah proyek.";
-      const icon = data.icon || "/logo-reaport.png";
-      const badge = data.badge || "/icon-192x192.png";
-      const url = data.url || "/user/dashboard";
-      const tag = data.tag || "assignment";
-
-      return self.registration.showNotification(title, {
-        body,
-        icon,
-        badge,
-        tag,
-        renotify: true,
-        requireInteraction: false,
-        data: { url },
-      });
-    })()
-  );
-});
-
-self.addEventListener("notificationclick", (event) => {
-  event.notification.close();
-  const url = (event.notification && event.notification.data && event.notification.data.url) || "/user/dashboard";
-
-  event.waitUntil(
-    (async () => {
-      const allClients = await clients.matchAll({
-        type: "window",
-        includeUncontrolled: true,
-      });
-      // Fokuskan tab yang sudah mengarah ke URL target
-      for (const c of allClients) {
-        try {
-          const cu = new URL(c.url);
-          if (cu.pathname === url || (url && c.url.includes(url))) {
-            await c.focus();
-            return;
-          }
-        } catch (_) {}
-      }
-      // Jika belum ada → buka tab baru
-      await clients.openWindow(url);
-    })()
-  );
-});
-
-// Jika subscription berubah (expired/rotasi key), minta app re-subscribe
-self.addEventListener("pushsubscriptionchange", (event) => {
-  event.waitUntil(
-    (async () => {
-      await notifyClients({ type: "pushsubscriptionchange" });
     })()
   );
 });
