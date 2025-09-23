@@ -5,6 +5,12 @@ export type EnsureOptions = {
   /** API endpoint untuk menyimpan subscription di server */
   subscribeEndpoint?: string; // default: "/api/push/subscribe"
 
+  /** Bisa kirim email langsung... */
+  email?: string;
+
+  /** ...atau ambil via callback saat runtime */
+  getEmail?: () => string | undefined;
+
   /** Override VAPID public key (opsional). Default: process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY */
   vapidPublicKey?: string;
 
@@ -29,6 +35,7 @@ const DEFAULT_SUBSCRIBE_ENDPOINT = "/api/push/subscribe";
 /* =========================================================================
  * Utilities
  * ========================================================================= */
+
 export function isPushSupported(): boolean {
   if (typeof window === "undefined") return false;
   return (
@@ -59,16 +66,11 @@ function toApplicationServerKeyBuffer(vapidPublicKey: string): ArrayBuffer {
   return ab;
 }
 
-/** Ambil registration; kalau belum ada, register /sw.js dulu */
-async function getOrRegisterSW(): Promise<ServiceWorkerRegistration> {
+/** SW registration yang sudah ready */
+async function getSWRegistration(): Promise<ServiceWorkerRegistration> {
   if (!("serviceWorker" in navigator))
     throw new Error("service worker not supported");
-  const existing =
-    (await navigator.serviceWorker.getRegistration()) ||
-    (await navigator.serviceWorker.register("/sw.js"));
-  // pastikan active/ready
-  await navigator.serviceWorker.ready.catch(() => {});
-  return existing;
+  return navigator.serviceWorker.ready;
 }
 
 /** Permission saat ini */
@@ -87,15 +89,28 @@ export async function requestNotificationPermission(): Promise<NotificationPermi
 
 /** Ambil subscription aktif (jika ada) */
 export async function getExistingSubscription(): Promise<PushSubscription | null> {
-  const reg = await getOrRegisterSW();
+  const reg = await getSWRegistration();
   return reg.pushManager.getSubscription();
 }
 
 /** Unsubscribe (opsional: beritahu server di kemudian hari) */
-export async function unsubscribePush(): Promise<boolean> {
+export async function unsubscribePush(removeFromServer = true): Promise<boolean> {
   try {
     const sub = await getExistingSubscription();
     if (!sub) return true;
+
+    // (Opsional) panggil API untuk hapus di server berdasarkan endpoint
+    if (removeFromServer) {
+      try {
+        const json = sub.toJSON();
+        const endpoint = json?.endpoint || sub.endpoint;
+        void endpoint; // placeholder kalau nanti mau dipakai
+        // await fetch("/api/push/unsubscribe", { ... });
+      } catch {
+        // abaikan error server-side removal
+      }
+    }
+
     return await sub.unsubscribe();
   } catch {
     return false;
@@ -105,9 +120,7 @@ export async function unsubscribePush(): Promise<boolean> {
 /* =========================================================================
  * ensurePushSubscription: pastikan ada subscription & simpan ke server
  * ========================================================================= */
-export async function ensurePushSubscription(
-  options: EnsureOptions = {}
-): Promise<EnsureResult> {
+export async function ensurePushSubscription(options: EnsureOptions): Promise<EnsureResult> {
   const {
     subscribeEndpoint = DEFAULT_SUBSCRIBE_ENDPOINT,
     onDenied,
@@ -119,11 +132,21 @@ export async function ensurePushSubscription(
     if (typeof window === "undefined") return { ok: false, reason: "ssr" };
     if (!isPushSupported()) return { ok: false, reason: "unsupported" };
 
+    // Ambil email dari opsi
+    const email =
+      (typeof options.email === "string" && options.email.trim()) ||
+      (typeof options.getEmail === "function"
+        ? (options.getEmail() || "").trim()
+        : "");
+
+    if (!email) return { ok: false, reason: "missing_user_email" };
+
     // Ambil VAPID public key (opsi > env)
     const vapidPublicKey =
       options.vapidPublicKey ||
       (process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY as string | undefined) ||
       "";
+
     if (!vapidPublicKey) return { ok: false, reason: "missing_vapid_key" };
 
     // 1) Permission
@@ -134,7 +157,7 @@ export async function ensurePushSubscription(
     }
 
     // 2) SW
-    const registration = await getOrRegisterSW();
+    const registration = await getSWRegistration();
 
     // 3) Existing subscription
     let subscription = await registration.pushManager.getSubscription();
@@ -159,21 +182,16 @@ export async function ensurePushSubscription(
       }
     }
 
-    // 5) Upsert ke server: kirim { endpoint, keys:{p256dh,auth} }
-    const json = subscription.toJSON?.() ?? {};
-    const payload = {
-      endpoint: json?.endpoint || subscription.endpoint,
-      keys: {
-        p256dh: json?.keys?.p256dh,
-        auth: json?.keys?.auth,
-      },
-    };
-
+    // 5) Upsert ke server: kirim { email, subscription, userAgent }
     const res = await fetch(subscribeEndpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       credentials: "same-origin",
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        email,
+        subscription: subscription.toJSON?.() ?? subscription, // aman untuk server
+        userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "",
+      }),
     });
 
     if (!res.ok) {
@@ -187,16 +205,19 @@ export async function ensurePushSubscription(
     return { ok: true };
   } catch (e) {
     onError?.(e);
-    return {
-      ok: false,
-      reason: `subscribe_failed: ${String((e as any)?.message || e)}`,
-    };
+    return { ok: false, reason: `subscribe_failed: ${String((e as any)?.message || e)}` };
   }
 }
 
-/** Panggil otomatis sesudah login (tanpa tombol) */
-export async function ensurePushAfterLogin(
-  opts?: Partial<EnsureOptions>
-): Promise<EnsureResult> {
-  return ensurePushSubscription(opts ?? {});
+/** Helper satu baris untuk tombol “Aktifkan Notifikasi” */
+export async function enablePushNow(): Promise<EnsureResult> {
+  // Pakai env & email dari localStorage (kalau kamu simpan di sana).
+  // Silakan ganti strategi ambil email sesuai aplikasimu.
+  const email =
+    (typeof window !== "undefined" &&
+      (localStorage.getItem("userEmail") || "").trim()) ||
+    "";
+  return ensurePushSubscription({
+    email,
+  });
 }

@@ -1,8 +1,10 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/lib/supabaseBrowser";
+import { ensurePushSubscription } from "@/lib/pushClient";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -16,6 +18,10 @@ import {
   UserCircle,
   AlertCircle,
   AlertTriangle,
+  Bell,
+  BellOff,
+  CheckCircle2,
+  Loader2,
 } from "lucide-react";
 
 interface TechnicianHeaderProps {
@@ -27,6 +33,15 @@ interface TechnicianHeaderProps {
   onFilterChange?: (value: "all" | "survey" | "instalasi") => void;
 }
 
+type NotifStatus =
+  | "idle"        // belum dicek
+  | "loading"     // sedang proses enable
+  | "enabled"     // permission granted & ada subscription
+  | "prompt"      // bisa diminta (permission default)
+  | "blocked"     // permission denied
+  | "unsupported" // browser tidak support
+  | "error";      // error saat enable
+
 export function TechnicianHeader({
   title,
   showBackButton = false,
@@ -37,6 +52,7 @@ export function TechnicianHeader({
 }: TechnicianHeaderProps) {
   const router = useRouter();
 
+  /* =================== Logout & navigasi existing =================== */
   async function handleLogout() {
     try {
       await supabase.auth.signOut();
@@ -65,6 +81,163 @@ export function TechnicianHeader({
     router.push("/user/damageComplain");
   };
 
+  /* =================== Push Notification (baru) =================== */
+
+  const supported = useMemo(() => {
+    // minimal support untuk web push
+    return (
+      typeof window !== "undefined" &&
+      "serviceWorker" in navigator &&
+      "PushManager" in window &&
+      "Notification" in window
+    );
+  }, []);
+
+  const [notifStatus, setNotifStatus] = useState<NotifStatus>("idle");
+  const [email, setEmail] = useState<string | undefined>(undefined);
+
+  // Ambil email user dari Supabase (client)
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const { data } = await supabase.auth.getUser();
+        if (!mounted) return;
+        const em =
+          (data?.user?.email && data.user.email.trim()) ||
+          // fallback kecil bila kamu simpan local:
+          (typeof window !== "undefined"
+            ? localStorage.getItem("userEmail") || undefined
+            : undefined);
+        setEmail(em || undefined);
+      } catch {
+        // abaikan
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  // Deteksi status permission + subscription awal
+  useEffect(() => {
+    if (!supported) {
+      setNotifStatus("unsupported");
+      return;
+    }
+    let disposed = false;
+    (async () => {
+      try {
+        const perm = Notification.permission; // "granted" | "denied" | "default"
+        // cek subscription yang aktif
+        const reg = await navigator.serviceWorker.ready;
+        const sub = await reg.pushManager.getSubscription();
+        if (disposed) return;
+
+        if (perm === "denied") {
+          setNotifStatus("blocked");
+        } else if (perm === "granted") {
+          setNotifStatus(sub ? "enabled" : "prompt"); // granted tapi sub null → perlu subscribe ulang
+        } else {
+          setNotifStatus("prompt");
+        }
+      } catch {
+        if (!disposed) setNotifStatus("error");
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [supported]);
+
+  async function handleEnableNotifications() {
+    if (!supported) {
+      setNotifStatus("unsupported");
+      return;
+    }
+    if (!email) {
+      // tanpa email kita tidak bisa simpan subscription terikat user
+      alert("Tidak dapat mengaktifkan notifikasi: email user tidak tersedia.");
+      return;
+    }
+    setNotifStatus("loading"); 
+    try {
+    await ensurePushSubscription({
+      subscribeEndpoint: "/api/push/subscribe",
+      getEmail: () => email!,                // pastikan email sudah ada sebelum dipanggil
+      onDenied: () => setNotifStatus("blocked"),
+      onError: () => setNotifStatus("error"),
+    });
+      // re-cek subscription untuk pastikan enabled
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      setNotifStatus(sub ? "enabled" : "prompt");
+    } catch (e) {
+      console.error("Enable notifications error:", e);
+      setNotifStatus("error");
+    }
+  }
+
+  // Elemen tombol + status kecil
+  const NotifButton = () => {
+    if (!supported) {
+      return (
+        <Button variant="outline" size="sm" className="h-7 px-2 text-xs" disabled>
+          <BellOff className="h-4 w-4 mr-1" />
+          Notifikasi: Tidak didukung
+        </Button>
+      );
+    }
+    if (notifStatus === "enabled") {
+      return (
+        <Button variant="outline" size="sm" className="h-7 px-2 text-xs" disabled>
+          <CheckCircle2 className="h-4 w-4 mr-1" />
+          Notifikasi Aktif
+        </Button>
+      );
+    }
+    if (notifStatus === "blocked") {
+      return (
+        <Button
+          variant="destructive"
+          size="sm"
+          className="h-7 px-2 text-xs"
+          onClick={() =>
+            alert(
+              "Notifikasi diblokir oleh browser. Buka pengaturan situs di browser Anda dan izinkan Notifications untuk domain ini."
+            )
+          }
+        >
+          <BellOff className="h-4 w-4 mr-1" />
+          Notifikasi Diblokir
+        </Button>
+      );
+    }
+    if (notifStatus === "loading") {
+      return (
+        <Button variant="default" size="sm" className="h-7 px-2 text-xs" disabled>
+          <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+          Mengaktifkan...
+        </Button>
+      );
+    }
+    if (notifStatus === "error") {
+      return (
+        <Button variant="destructive" size="sm" className="h-7 px-2 text-xs" onClick={handleEnableNotifications}>
+          <Bell className="h-4 w-4 mr-1" />
+          Coba Lagi
+        </Button>
+      );
+    }
+    // "idle" | "prompt"
+    return (
+      <Button variant="default" size="sm" className="h-7 px-2 text-xs" onClick={handleEnableNotifications}>
+        <Bell className="h-4 w-4 mr-1" />
+        Aktifkan Notifikasi
+      </Button>
+    );
+  };
+
   return (
     <header className="bg-white shadow-sm border-b">
       <div className="px-4 py-4 flex items-center justify-between">
@@ -83,6 +256,7 @@ export function TechnicianHeader({
         </div>
 
         <div className="flex items-center gap-2">
+          {/* === Filter existing === */}
           {showFilter && (
             <div className="flex items-center gap-1">
               <Button
@@ -112,6 +286,10 @@ export function TechnicianHeader({
             </div>
           )}
 
+          {/* === Tombol Enable Notifications (baru) === */}
+          <NotifButton />
+
+          {/* === Menu existing === */}
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="sm" className="p-2">

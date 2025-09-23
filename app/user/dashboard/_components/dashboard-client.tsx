@@ -9,7 +9,6 @@ import { Pagination } from "@/components/pagination";
 import { Star } from "lucide-react";
 import { PWAInstallPrompt } from "@/components/pwa-install-prompt";
 import { createClient } from "@supabase/supabase-js";
-import { ensurePushAfterLogin } from "@/lib/pushClient"; // 
 
 /** ===================== Types ===================== **/
 type Job = {
@@ -92,9 +91,6 @@ export default function TechnicianDashboard() {
   // cegah double PATCH completed
   const completedPostedRef = useRef<Set<string>>(new Set());
 
-  // 🔵 NEW: cegah auto-navigate dua kali untuk parameter ?job atau pesan SW
-  const consumedJobParamRef = useRef<string | null>(null);
-
   /** ==== Progress helper (ambil dari /api/job-photos/[jobId]) ==== */
   async function getJobProgress(jobId: string): Promise<{
     percent: number;
@@ -115,7 +111,10 @@ export default function TechnicianDashboard() {
       // Status pending/active
       const isPending = String(json?.status || "") === "pending";
 
-      // Robust ambil done/total dari beberapa kemungkinan field
+      // Robust ambil done/total dari beberapa kemungkinan field:
+      // - progress.done / progress.total (baru)
+      // - progress.complete / progress.total (sebelumnya)
+      // - uploaded / total (top-level, legacy)
       const done =
         toNum(json?.progress?.done) ??
         toNum(json?.progress?.complete) ??
@@ -171,6 +170,7 @@ export default function TechnicianDashboard() {
   }
 
   /** ==== Loader utama ==== */
+  // ganti bagian loadJobs()
   const loadJobs = async () => {
     try {
       setLoading(true);
@@ -209,53 +209,11 @@ export default function TechnicianDashboard() {
     }
   };
 
-  // 🔵 NEW: minta izin & subscribe push otomatis setelah login
-  useEffect(() => {
-    ensurePushAfterLogin();
-  }, []);
-
   // Load awal & saat query berubah
   useEffect(() => {
     loadJobs();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
-
-  // 🔵 NEW: jika URL punya ?job=<projectId>, buka job itu saat data sudah ada
-  useEffect(() => {
-    const projectId = searchParams.get("job");
-    if (!projectId || !jobs.length) return;
-    if (consumedJobParamRef.current === projectId) return;
-
-    const found = jobs.find((j) => j.id === projectId);
-    if (found) {
-      consumedJobParamRef.current = projectId;
-      handleJobClick(found);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jobs, searchParams]);
-
-  // 🔵 NEW: dengarkan pesan dari SW (notificationclick → postMessage 'notif-open')
-  useEffect(() => {
-    const onMsg = (event: MessageEvent) => {
-      const t = (event?.data as any)?.type;
-      if (t !== "notif-open") return;
-      const url: string = (event?.data as any)?.payload?.url || "";
-      try {
-        const u = new URL(url, location.origin);
-        const pid = u.searchParams.get("job");
-        if (!pid) return;
-
-        consumedJobParamRef.current = pid;
-        const found = jobs.find((j) => j.id === pid);
-        if (found) handleJobClick(found);
-        else router.push(`/user/dashboard?job=${encodeURIComponent(pid)}`);
-      } catch {}
-    };
-
-    navigator.serviceWorker?.addEventListener("message", onMsg);
-    return () => navigator.serviceWorker?.removeEventListener("message", onMsg);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [jobs]);
 
   /** ==== Realtime Global (projects & assignments) ==== */
   useEffect(() => {
