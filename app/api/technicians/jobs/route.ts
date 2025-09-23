@@ -92,10 +92,24 @@ export async function GET(req: NextRequest) {
       .is("project_assignments.removed_at", null)
       .order("created_at", { ascending: false });
 
-    if (!debugAll) {
-      if (!technicianId) return NextResponse.json({ items: [] });
-      q = q.eq("project_assignments.technician_id", technicianId);
+if (!debugAll) {
+  if (!technicianId) {
+    // coba map dari user yang login (email -> technicians.id)
+    const { data: auth } = await supabase.auth.getUser();
+    const email = auth?.user?.email || null;
+    if (email) {
+      const { data: tMap, error: tMapErr } = await supabase
+        .from("technicians")
+        .select("id")
+        .eq("email", email)
+        .maybeSingle();
+      if (tMapErr) throw tMapErr;
+      technicianId = tMap?.id ?? null;
     }
+  }
+  if (!technicianId) return NextResponse.json({ items: [] });
+  q = q.eq("project_assignments.technician_id", technicianId);
+}
 
     const { data, error } = await q;
     if (error) throw error;
