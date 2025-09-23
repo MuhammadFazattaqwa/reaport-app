@@ -4,7 +4,7 @@ export const runtime = "nodejs";
 import { NextRequest, NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabaseServers"; // server-side client (RLS ON)
 import { supabaseAdmin, supabaseAdmins } from "@/lib/supabaseAdmin"; // admin client (service-role, BYPASS RLS)
-import { sendPushToEmails } from "@/lib/sendAssignmentPush"; // helper kirim push
+import { sendPushToEmails } from "@/lib/sendAssignmentPush"; // ADD: helper kirim push
 
 type ShapedAssignment = {
   projectId: string;
@@ -45,12 +45,6 @@ function initialFrom(text: string) {
   if (!/[A-Za-z\u00C0-\u024F]/.test(tok)) tok = tokens[0] || "";
   const ch = (tok.match(/[A-Za-z\u00C0-\u024F]/) || [tok[0] || "?"])[0];
   return (ch || "?").toUpperCase();
-}
-
-/** Fallback code cantik bila tidak ada project_code (hindari UUID panjang) */
-function shortId(id?: string | null) {
-  const s = String(id || "").replace(/-/g, "");
-  return s ? s.slice(0, 8).toUpperCase() : "";
 }
 
 /* Tampilan nama/inisial konsisten */
@@ -393,7 +387,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "date wajib diisi" }, { status: 400 });
   }
 
-  // Penampung teknisi yang BARU ditambahkan (untuk push)
+  // ADD: penampung teknisi yang BARU ditambahkan (untuk push)
   let newlyAddedForPush: Array<{ project_id: string; technician_id: string }> =
     [];
 
@@ -586,6 +580,7 @@ export async function POST(req: NextRequest) {
   /* ========= 2) Sinkron project_assignments (harian; teknisi & kendaraan) ========= */
   if (projectsWithAssignments.length && activeScopeProjectIds.length) {
     // 2.a Ambil LEADER & SUPERVISOR EXISTING utk tanggal ini
+    //    -> dipakai hanya bila leader TIDAK BERUBAH; jika leader BERUBAH maka akan memakai DEFAULT supervisor leader baru.
     const existingLeaderInfoByProject = new Map<
       string,
       { leaderTid: string | null; supervisorId: string | null }
@@ -686,11 +681,13 @@ export async function POST(req: NextRequest) {
 
         let supId: string | null = null;
         if (isLeader) {
-          // pertahankan supervisor existing jika leader tidak berubah; jika berubah pakai default
-          // (info existing diambil di atas)
-          const existing = null; // kita update di bawah (lebih simpel untuk maintain)
-          if (existing && (existing as any).leaderTid === tid && (existing as any).supervisorId) {
-            supId = (existing as any).supervisorId;
+          const existing = existingLeaderInfoByProject.get(pid);
+          // Leader TIDAK berubah -> pertahankan supervisor existing bila ada
+          if (existing && existing.leaderTid === tid && existing.supervisorId) {
+            supId = existing.supervisorId;
+          } else {
+            // Leader BERUBAH atau belum ada -> pakai default supervisor milik leader baru
+            supId = defaultSupByTech.get(tid)?.id ?? null;
           }
         }
 
@@ -735,7 +732,7 @@ export async function POST(req: NextRequest) {
           });
         }
       }
-      newlyAddedForPush = tmp;
+      newlyAddedForPush = tmp; // simpan untuk dipakai di akhir
     }
 
     if (paRows.length) {
@@ -870,54 +867,33 @@ export async function POST(req: NextRequest) {
           if (em) emailByTech.set(t.id as string, em);
         }
 
-        // Ambil meta proyek lengkap untuk label, code, customer, site
+        // Ambil label proyek (code/name), fallback ke id
         const { data: projMeta, error: projErr2 } = await supabaseAdmins()
           .from("projects")
-          .select("id, project_code, name, project_name, kode, nama, customer, site")
+          .select("id, project_code, name, project_name, kode, nama")
           .in("id", projIds);
 
         const projectLabel = new Map<string, string>();
-        const projectCodeById = new Map<string, string>();
-        const customerById = new Map<string, string | null>();
-        const siteById = new Map<string, string | null>();
-
         if (!projErr2) {
           for (const p of (projMeta ?? []) as any[]) {
-            const id = p.id as string;
-
             const label =
               (p?.project_code as string) ||
               (p?.project_name as string) ||
               (p?.name as string) ||
               (p?.kode as string) ||
               (p?.nama as string) ||
-              shortId(id);
-            projectLabel.set(id, label);
-
-            const code =
-              (p?.project_code as string) ||
-              (p?.kode as string) ||
-              shortId(id);
-            projectCodeById.set(id, code);
-
-            customerById.set(id, (p?.customer as string) ?? null);
-            siteById.set(id, (p?.site as string) ?? null);
+              (p?.id as string);
+            projectLabel.set(p.id as string, label);
           }
         }
 
-        // Kelompokkan per teknisi → daftar label proyek & simpan project pertama
+        // Kelompokkan per teknisi → daftar label proyek
         const byTech = new Map<string, string[]>();
-        const firstProjectIdByTech = new Map<string, string>();
-
         for (const it of newlyAddedForPush) {
-          const label = projectLabel.get(it.project_id) ?? shortId(it.project_id);
+          const label = projectLabel.get(it.project_id) ?? it.project_id;
           const arr = byTech.get(it.technician_id) ?? [];
           if (!arr.includes(label)) arr.push(label);
           byTech.set(it.technician_id, arr);
-
-          if (!firstProjectIdByTech.has(it.technician_id)) {
-            firstProjectIdByTech.set(it.technician_id, it.project_id);
-          }
         }
 
         // Kirim notifikasi
@@ -930,29 +906,17 @@ export async function POST(req: NextRequest) {
               ? "Kamu di-assign ke beberapa project baru"
               : "Kamu di-assign ke project baru";
 
-          // Biarkan SW merapikan body saat hanya 1 project (menggunakan projectCode/customer/site)
           const body =
             labels.length > 1
               ? labels.slice(0, 3).join(", ") +
                 (labels.length > 3 ? `, +${labels.length - 3} lainnya` : "")
               : labels[0];
 
-          const pid =
-            labels.length === 1 ? firstProjectIdByTech.get(techId) : undefined;
-
-          const pcode = pid ? projectCodeById.get(pid) ?? shortId(pid) : undefined;
-          const customer = pid ? (customerById.get(pid) || undefined) : undefined;
-          const site = pid ? (siteById.get(pid) || undefined) : undefined;
-
           await sendPushToEmails([email], {
             title,
             body,
-            url: pid ? `/user/dashboard?job=${pid}` : "/user/dashboard",
+            url: "/user/dashboard", // klik notif → buka dashboard teknisi
             tag: `assign-${date}-${techId}`, // supaya notifikasi sejenis dimerge
-            projectId: pid,
-            projectCode: pcode,
-            customer,
-            site,
           });
         }
       }

@@ -1,223 +1,55 @@
-// src/lib/pushClient.ts
-"use client";
+// /lib/pushClient.ts
+const VAPID_PUBLIC = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY!;
 
-export type EnsureOptions = {
-  /** API endpoint untuk menyimpan subscription di server */
-  subscribeEndpoint?: string; // default: "/api/push/subscribe"
-
-  /** Bisa kirim email langsung... */
-  email?: string;
-
-  /** ...atau ambil via callback saat runtime */
-  getEmail?: () => string | undefined;
-
-  /** Override VAPID public key (opsional). Default: process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY */
-  vapidPublicKey?: string;
-
-  /** Re-subscribe jika subscription lama tidak punya keys p256dh/auth */
-  resubscribeIfChanged?: boolean; // default: true
-
-  /** Callback ketika user menolak permission */
-  onDenied?: () => void;
-
-  /** Callback error operasional (network/subscribe) */
-  onError?: (e: unknown) => void;
-};
-
-type EnsureResult = {
-  ok: boolean;
-  reason?: string;
-  status?: number;
-};
-
-const DEFAULT_SUBSCRIBE_ENDPOINT = "/api/push/subscribe";
-
-/* =========================================================================
- * Utilities
- * ========================================================================= */
-
-export function isPushSupported(): boolean {
-  if (typeof window === "undefined") return false;
-  return (
-    "serviceWorker" in navigator &&
-    "PushManager" in window &&
-    "Notification" in window
-  );
-}
-
-/** Base64URL → Uint8Array */
-export function urlBase64ToUint8Array(base64Url: string): Uint8Array {
-  const padding = "=".repeat((4 - (base64Url.length % 4)) % 4);
-  const base64 = (base64Url + padding).replace(/-/g, "+").replace(/_/g, "/");
-  const raw =
-    typeof atob === "function"
-      ? atob(base64)
-      : Buffer.from(base64, "base64").toString("binary");
+function urlB64ToUint8Array(b64: string) {
+  const pad = "=".repeat((4 - (b64.length % 4)) % 4);
+  const base64 = (b64 + pad).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base64);
   const out = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  for (let i = 0; i < raw.length; ++i) out[i] = raw.charCodeAt(i);
   return out;
 }
 
-/** Pastikan mengembalikan ArrayBuffer murni (bukan SharedArrayBuffer) */
-function toApplicationServerKeyBuffer(vapidPublicKey: string): ArrayBuffer {
-  const u8 = urlBase64ToUint8Array(vapidPublicKey);
-  const ab = new ArrayBuffer(u8.byteLength);
-  new Uint8Array(ab).set(u8);
-  return ab;
-}
-
-/** SW registration yang sudah ready */
-async function getSWRegistration(): Promise<ServiceWorkerRegistration> {
-  if (!("serviceWorker" in navigator))
-    throw new Error("service worker not supported");
-  return navigator.serviceWorker.ready;
-}
-
-/** Permission saat ini */
-export async function getPermissionState(): Promise<NotificationPermission> {
-  if (typeof window === "undefined" || !("Notification" in window))
-    return "denied";
-  return Notification.permission;
-}
-
-/** Minta izin notifikasi jika belum granted */
-export async function requestNotificationPermission(): Promise<NotificationPermission> {
-  if (!("Notification" in window)) return "denied";
-  if (Notification.permission === "granted") return "granted";
-  return Notification.requestPermission();
-}
-
-/** Ambil subscription aktif (jika ada) */
-export async function getExistingSubscription(): Promise<PushSubscription | null> {
-  const reg = await getSWRegistration();
-  return reg.pushManager.getSubscription();
-}
-
-/** Unsubscribe (opsional: beritahu server di kemudian hari) */
-export async function unsubscribePush(removeFromServer = true): Promise<boolean> {
-  try {
-    const sub = await getExistingSubscription();
-    if (!sub) return true;
-
-    // (Opsional) panggil API untuk hapus di server berdasarkan endpoint
-    if (removeFromServer) {
-      try {
-        const json = sub.toJSON();
-        const endpoint = json?.endpoint || sub.endpoint;
-        void endpoint; // placeholder kalau nanti mau dipakai
-        // await fetch("/api/push/unsubscribe", { ... });
-      } catch {
-        // abaikan error server-side removal
-      }
-    }
-
-    return await sub.unsubscribe();
-  } catch {
-    return false;
-  }
-}
-
-/* =========================================================================
- * ensurePushSubscription: pastikan ada subscription & simpan ke server
- * ========================================================================= */
-export async function ensurePushSubscription(options: EnsureOptions): Promise<EnsureResult> {
-  const {
-    subscribeEndpoint = DEFAULT_SUBSCRIBE_ENDPOINT,
-    onDenied,
-    onError,
-    resubscribeIfChanged = true,
-  } = options;
-
-  try {
-    if (typeof window === "undefined") return { ok: false, reason: "ssr" };
-    if (!isPushSupported()) return { ok: false, reason: "unsupported" };
-
-    // Ambil email dari opsi
-    const email =
-      (typeof options.email === "string" && options.email.trim()) ||
-      (typeof options.getEmail === "function"
-        ? (options.getEmail() || "").trim()
-        : "");
-
-    if (!email) return { ok: false, reason: "missing_user_email" };
-
-    // Ambil VAPID public key (opsi > env)
-    const vapidPublicKey =
-      options.vapidPublicKey ||
-      (process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY as string | undefined) ||
-      "";
-
-    if (!vapidPublicKey) return { ok: false, reason: "missing_vapid_key" };
-
-    // 1) Permission
-    const permission = await requestNotificationPermission();
-    if (permission !== "granted") {
-      onDenied?.();
-      return { ok: false, reason: "permission_denied" };
-    }
-
-    // 2) SW
-    const registration = await getSWRegistration();
-
-    // 3) Existing subscription
-    let subscription = await registration.pushManager.getSubscription();
-
-    // 4) Subscribe baru / resubscribe jika keys tidak lengkap
-    if (!subscription) {
-      subscription = await registration.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: toApplicationServerKeyBuffer(vapidPublicKey),
-      });
-    } else if (resubscribeIfChanged) {
-      const json: any = subscription.toJSON?.() ?? {};
-      const hasKeys = json?.keys?.p256dh && json?.keys?.auth;
-      if (!hasKeys) {
-        try {
-          await subscription.unsubscribe();
-        } catch {}
-        subscription = await registration.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: toApplicationServerKeyBuffer(vapidPublicKey),
-        });
-      }
-    }
-
-    // 5) Upsert ke server: kirim { email, subscription, userAgent }
-    const res = await fetch(subscribeEndpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
-      body: JSON.stringify({
-        email,
-        subscription: subscription.toJSON?.() ?? subscription, // aman untuk server
-        userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "",
-      }),
-    });
-
-    if (!res.ok) {
-      return {
-        ok: false,
-        reason: "server_upsert_failed",
-        status: res.status,
-      };
-    }
-
-    return { ok: true };
-  } catch (e) {
-    onError?.(e);
-    return { ok: false, reason: `subscribe_failed: ${String((e as any)?.message || e)}` };
-  }
-}
-
-/** Helper satu baris untuk tombol “Aktifkan Notifikasi” */
-export async function enablePushNow(): Promise<EnsureResult> {
-  // Pakai env & email dari localStorage (kalau kamu simpan di sana).
-  // Silakan ganti strategi ambil email sesuai aplikasimu.
-  const email =
-    (typeof window !== "undefined" &&
-      (localStorage.getItem("userEmail") || "").trim()) ||
-    "";
-  return ensurePushSubscription({
-    email,
+async function saveSubscription(sub: PushSubscription) {
+  const payload = {
+    endpoint: sub.endpoint,
+    keys: {
+      p256dh: (sub.toJSON() as any)?.keys?.p256dh,
+      auth: (sub.toJSON() as any)?.keys?.auth,
+    },
+  };
+  await fetch("/api/push/subscribe", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
   });
+}
+
+/** Panggil sekali sesudah user berhasil login (mis. di layout halaman private) */
+export async function ensurePushAfterLogin() {
+  if (typeof window === "undefined") return;
+  if (!("serviceWorker" in navigator) || !("Notification" in window)) return;
+
+  // Pastikan SW terdaftar
+  const reg =
+    (await navigator.serviceWorker.getRegistration()) ||
+    (await navigator.serviceWorker.register("/sw.js"));
+
+  // Kalau belum pernah diprompt, minta izin otomatis
+  if (Notification.permission === "default") {
+    try { await Notification.requestPermission(); } catch {}
+  }
+
+  if (Notification.permission !== "granted") return;
+
+  // Subscribe jika belum ada
+  const existing = await reg.pushManager.getSubscription();
+  const sub =
+    existing ||
+    (await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlB64ToUint8Array(VAPID_PUBLIC),
+    }));
+
+  await saveSubscription(sub);
 }
