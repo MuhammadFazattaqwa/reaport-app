@@ -10,6 +10,12 @@ import { Star } from "lucide-react";
 import { PWAInstallPrompt } from "@/components/pwa-install-prompt";
 import { createClient } from "@supabase/supabase-js";
 
+/* === Tambahan untuk auto notifikasi === */
+import {
+  ensurePushSubscription,
+  getPermissionState,
+} from "@/lib/pushClient";
+
 /** ===================== Types ===================== **/
 type Job = {
   id: string; // projects.id (uuid)
@@ -170,7 +176,6 @@ export default function TechnicianDashboard() {
   }
 
   /** ==== Loader utama ==== */
-  // ganti bagian loadJobs()
   const loadJobs = async () => {
     try {
       setLoading(true);
@@ -400,6 +405,68 @@ export default function TechnicianDashboard() {
         supabase.removeChannel(photosChannelRef.current);
       if (surveyRoomsChannelRef.current)
         supabase.removeChannel(surveyRoomsChannelRef.current);
+    };
+  }, []);
+
+  /** ==== PUSH NOTIFICATION (AUTO) ==== */
+  useEffect(() => {
+    // Cek dukungan browser
+    const isSupported =
+      typeof window !== "undefined" &&
+      "serviceWorker" in navigator &&
+      "PushManager" in window &&
+      "Notification" in window;
+
+    if (!isSupported) return;
+
+    // Jalankan sekali per sesi/tab
+    const ASK_KEY = "notif_auto_asked_v1";
+    if (sessionStorage.getItem(ASK_KEY) === "yes") return;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        // 1) Cek permission & subscription sekarang
+        const perm = await getPermissionState().catch(() => "default" as const);
+        const reg = await navigator.serviceWorker.ready;
+        const sub = await reg.pushManager.getSubscription();
+
+        // 2) Minta hanya jika perlu:
+        //    - belum pernah minta izin (default), atau
+        //    - sudah granted tapi belum ada subscription (hilang/expired)
+        if (perm === "default" || (perm === "granted" && !sub)) {
+          // Ambil email user (supabase) → fallback localStorage
+          const { data } = await supabase.auth.getUser();
+          const email =
+            data?.user?.email ||
+            (typeof window !== "undefined"
+              ? localStorage.getItem("userEmail") || ""
+              : "");
+
+          if (!email) return; // tak ada email → jangan prompt
+
+          sessionStorage.setItem(ASK_KEY, "yes");
+          if (cancelled) return;
+
+          const res = await ensurePushSubscription({
+            email,
+            subscribeEndpoint: "/api/push/subscribe",
+          });
+
+          // Optional logging untuk debug
+          if (!res.ok && res.reason !== "permission_denied") {
+            console.warn("ensurePushSubscription gagal:", res.reason);
+          }
+        }
+      } catch (e) {
+        // jangan ganggu UX
+        console.warn("Auto-push init error:", e);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
     };
   }, []);
 
