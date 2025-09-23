@@ -9,12 +9,7 @@ import { Pagination } from "@/components/pagination";
 import { Star } from "lucide-react";
 import { PWAInstallPrompt } from "@/components/pwa-install-prompt";
 import { createClient } from "@supabase/supabase-js";
-
-/* === Tambahan untuk auto notifikasi === */
-import {
-  ensurePushSubscription,
-  getPermissionState,
-} from "@/lib/pushClient";
+import { ensurePushSubscription } from "@/lib/pushClient";
 
 /** ===================== Types ===================== **/
 type Job = {
@@ -408,67 +403,47 @@ export default function TechnicianDashboard() {
     };
   }, []);
 
-  /** ==== PUSH NOTIFICATION (AUTO) ==== */
-  useEffect(() => {
-    // Cek dukungan browser
-    const isSupported =
-      typeof window !== "undefined" &&
+  /** ==== Web Push: auto-aktifkan segera di dashboard ==== */
+  const pushSupported = useMemo(() => {
+    if (typeof window === "undefined") return false;
+    return (
       "serviceWorker" in navigator &&
-      "PushManager" in window &&
-      "Notification" in window;
+      "Notification" in window &&
+      "PushManager" in (window as any)
+    );
+  }, []);
 
-    if (!isSupported) return;
-
-    // Jalankan sekali per sesi/tab
-    const ASK_KEY = "notif_auto_asked_v1";
-    if (sessionStorage.getItem(ASK_KEY) === "yes") return;
-
-    let cancelled = false;
+  const pushInitRanRef = useRef(false);
+  useEffect(() => {
+    if (!pushSupported) return;
+    if (pushInitRanRef.current) return; // guard Strict Mode
+    pushInitRanRef.current = true;
 
     (async () => {
       try {
-        // 1) Cek permission & subscription sekarang
-        const perm = await getPermissionState().catch(() => "default" as const);
+        const ASK_KEY = "notif_auto_asked_v1";
+        if (sessionStorage.getItem(ASK_KEY) === "yes") return;
+
         const reg = await navigator.serviceWorker.ready;
-        const sub = await reg.pushManager.getSubscription();
+        const currentSub = await reg.pushManager.getSubscription();
+        const perm = Notification.permission; // 'default' | 'granted' | 'denied'
 
-        // 2) Minta hanya jika perlu:
-        //    - belum pernah minta izin (default), atau
-        //    - sudah granted tapi belum ada subscription (hilang/expired)
-        if (perm === "default" || (perm === "granted" && !sub)) {
-          // Ambil email user (supabase) → fallback localStorage
+        if (perm === "default" || (perm === "granted" && !currentSub)) {
           const { data } = await supabase.auth.getUser();
-          const email =
-            data?.user?.email ||
-            (typeof window !== "undefined"
-              ? localStorage.getItem("userEmail") || ""
-              : "");
-
-          if (!email) return; // tak ada email → jangan prompt
+          const email = (data?.user?.email || "").trim();
+          if (!email) return; // tanpa email, backend tak bisa kaitkan subscription
 
           sessionStorage.setItem(ASK_KEY, "yes");
-          if (cancelled) return;
-
-          const res = await ensurePushSubscription({
-            email,
+          await ensurePushSubscription({
             subscribeEndpoint: "/api/push/subscribe",
+            getEmail: () => email,
           });
-
-          // Optional logging untuk debug
-          if (!res.ok && res.reason !== "permission_denied") {
-            console.warn("ensurePushSubscription gagal:", res.reason);
-          }
         }
-      } catch (e) {
-        // jangan ganggu UX
-        console.warn("Auto-push init error:", e);
+      } catch {
+        // diamkan; tidak mengganggu UX
       }
     })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  }, [pushSupported]);
 
   /** ===================== Render ===================== **/
   return (
