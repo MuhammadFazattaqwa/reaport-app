@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/lib/supabaseBrowser";
-import { ensurePushSubscription } from "@/lib/pushClient"; // pastikan file ini mengekspor named (lihat catatan di bawah)
+import { ensurePushSubscription } from "@/lib/pushClient";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -88,43 +88,10 @@ function TechnicianHeader({
     };
   }, []);
 
-  /* =================== Auto-prompt sekali di dashboard =================== */
-  const ranOnce = useRef(false);
-  useEffect(() => {
-    if (!supported) return;
-    if (!email) return;
-    if (ranOnce.current) return;
-    if (!pathname?.startsWith("/user/dashboard")) return;
-
-    const ASK_KEY = "notif_auto_asked_v1";
-    if (typeof window === "undefined") return;
-    if (sessionStorage.getItem(ASK_KEY) === "yes") return;
-
-    (async () => {
-      try {
-        const reg = await navigator.serviceWorker.ready;
-        const currentSub = await reg.pushManager.getSubscription();
-        const perm = Notification.permission; // "default" | "granted" | "denied"
-
-        if (perm === "default" || (perm === "granted" && !currentSub)) {
-          ranOnce.current = true;
-          sessionStorage.setItem(ASK_KEY, "yes");
-          try {
-            await ensurePushSubscription({
-              subscribeEndpoint: "/api/push/subscribe",
-              getEmail: () => email!,
-              onDenied: () => {},
-              onError: () => {},
-            });
-          } catch {}
-        }
-      } catch {}
-    })();
-  }, [supported, email, pathname]);
-
   /* =================== Floating Button (pojok kanan bawah) =================== */
   const [showFab, setShowFab] = useState(false);
 
+  // Tampilkan FAB hanya di dashboard & ketika belum aktif
   useEffect(() => {
     if (!supported) {
       setShowFab(false);
@@ -138,7 +105,7 @@ function TechnicianHeader({
     let cancelled = false;
     (async () => {
       try {
-        const perm = Notification.permission;
+        const perm = Notification.permission; // "default" | "granted" | "denied"
         if (perm === "denied") {
           if (!cancelled) setShowFab(false);
           return;
@@ -161,6 +128,7 @@ function TechnicianHeader({
   }, [supported, pathname]);
 
   async function onFabClick() {
+    // Sembunyikan tombol segera setelah diklik (sesuai request)
     setShowFab(false);
     try {
       await ensurePushSubscription({
@@ -168,7 +136,7 @@ function TechnicianHeader({
         getEmail: () => email!,
       });
     } catch {
-      // diamkan; user tetap bisa lanjut
+      // diamkan; teknisi tetap bisa lanjut
     }
   }
 
@@ -258,6 +226,7 @@ function TechnicianHeader({
           size="icon"
           className="fixed md:hidden bottom-4 right-4 z-50 h-14 w-14 rounded-full shadow-lg"
           aria-label="Aktifkan notifikasi"
+          title="Aktifkan notifikasi"
         >
           <Bell className="h-6 w-6" />
         </Button>
