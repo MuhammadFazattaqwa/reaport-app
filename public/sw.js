@@ -1,5 +1,5 @@
 /* public/sw.js — fast offline upload with timeout & ACK + Web Push (VAPID) */
-const VERSION = "magang-app-v1.0.53"; // ⬅️ bump versi agar SW baru aktif
+const VERSION = "magang-app-v1.0.54"; // ⬅️ bump versi agar SW baru aktif
 const STATIC_CACHE = VERSION + "-static";
 const DYNAMIC_CACHE = VERSION + "-dynamic";
 
@@ -11,11 +11,12 @@ const APP_SHELL = [
   "/offline",
   "/manifest.json",
   "/logo-reaport.png",
+  "/badge-reaport.png",
 ];
 
 // Ikon notifikasi
 const NOTIF_ICON = "/logo-reaport.png";   // full-color
-const NOTIF_BADGE = "/logo-reaport.png";  // monokrom hitam-transparan
+const NOTIF_BADGE = "/badge-reaport.png";  // monokrom hitam-transparan
 
 /* ===== Config upload/meta ===== */
 const QUEUE_DB = "photo-upload-queue-db";

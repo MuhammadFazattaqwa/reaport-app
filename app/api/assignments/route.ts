@@ -844,87 +844,84 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: upSupErr.message }, { status: 500 });
   }
 
-  /* ========= (ADD) Kirim Push Notification ke TEKNISI yang BARU di-assign ========= */
-  try {
-    if (newlyAddedForPush.length) {
-      const techIds = Array.from(
-        new Set(newlyAddedForPush.map((x) => x.technician_id))
-      );
-      const projIds = Array.from(
-        new Set(newlyAddedForPush.map((x) => x.project_id))
-      );
+/* ========= (REPLACE) Kirim Push Notification ke TEKNISI yang BARU di-assign ========= */
+try {
+  if (newlyAddedForPush.length) {
+    const techIds = Array.from(new Set(newlyAddedForPush.map(x => x.technician_id)));
+    const projIds = Array.from(new Set(newlyAddedForPush.map(x => x.project_id)));
 
-      // Ambil email teknisi
-      const { data: techRows, error: techErr } = await supabaseAdmins()
-        .from("technicians")
-        .select("id, email")
-        .in("id", techIds);
+    // 1) Ambil email teknisi (FIX: bangun Map via loop agar tipe tidak error)
+    const { data: techRows, error: techErr } = await supabaseAdmins()
+      .from("technicians")
+      .select("id, email, name")
+      .in("id", techIds);
+    if (techErr) throw techErr;
 
-      if (!techErr && techRows?.length) {
-        const emailByTech = new Map<string, string>();
-        for (const t of (techRows ?? []) as any[]) {
-          const em = String(t?.email || "").trim();
-          if (em) emailByTech.set(t.id as string, em);
-        }
-
-        // Ambil label proyek (code/name), fallback ke id
-        const { data: projMeta, error: projErr2 } = await supabaseAdmins()
-          .from("projects")
-          .select("id, project_code, name, project_name, kode, nama")
-          .in("id", projIds);
-
-        const projectLabel = new Map<string, string>();
-        if (!projErr2) {
-          for (const p of (projMeta ?? []) as any[]) {
-            const label =
-              (p?.project_code as string) ||
-              (p?.project_name as string) ||
-              (p?.name as string) ||
-              (p?.kode as string) ||
-              (p?.nama as string) ||
-              (p?.id as string);
-            projectLabel.set(p.id as string, label);
-          }
-        }
-
-        // Kelompokkan per teknisi → daftar label proyek
-        const byTech = new Map<string, string[]>();
-        for (const it of newlyAddedForPush) {
-          const label = projectLabel.get(it.project_id) ?? it.project_id;
-          const arr = byTech.get(it.technician_id) ?? [];
-          if (!arr.includes(label)) arr.push(label);
-          byTech.set(it.technician_id, arr);
-        }
-
-        // Kirim notifikasi
-        for (const [techId, labels] of byTech) {
-          const email = emailByTech.get(techId);
-          if (!email) continue;
-
-          const title =
-            labels.length > 1
-              ? "Kamu di-assign ke beberapa project baru"
-              : "Kamu di-assign ke project baru";
-
-          const body =
-            labels.length > 1
-              ? labels.slice(0, 3).join(", ") +
-                (labels.length > 3 ? `, +${labels.length - 3} lainnya` : "")
-              : labels[0];
-
-          await sendPushToEmails([email], {
-            title,
-            body,
-            url: "/user/dashboard", // klik notif → buka dashboard teknisi
-            tag: `assign-${date}-${techId}`, // supaya notifikasi sejenis dimerge
-          });
-        }
-      }
+    const emailByTech = new Map<string, string>();
+    for (const t of (techRows ?? []) as any[]) {
+      const em = String(t?.email ?? "").trim();
+      if (em) emailByTech.set(String(t.id), em);
     }
-  } catch (e) {
-    // Jangan gagalkan request utama hanya karena push gagal
-    console.error("[assignments] push-notification error:", e);
+
+    // 2) Ambil meta proyek (fallback aman untuk kode/customer/site)
+    const { data: projRows2, error: projErr2 } = await supabaseAdmins()
+      .from("projects")
+      .select(`
+        id,
+        project_code,
+        project_name,
+        name,
+        kode,
+        nama,
+        customer,
+        customer_name,
+        site,
+        lokasi,
+        lokasi_nama
+      `)
+      .in("id", projIds);
+    if (projErr2) throw projErr2;
+
+    const projInfo = new Map<string, { code: string; customer: string; site: string }>();
+    for (const p of (projRows2 ?? []) as any[]) {
+      const code =
+        p.project_code || p.kode || p.project_name || p.name || p.nama || p.id;
+      const customer = p.customer || p.customer_name || "";
+      const site = p.site || p.lokasi || p.lokasi_nama || "";
+      projInfo.set(String(p.id), {
+        code: String(code),
+        customer: String(customer),
+        site: String(site),
+      });
+    }
+
+    // 3) Kirim PER ASSIGNMENT (tanpa properti ekstra supaya cocok tipe Payload)
+    for (const { project_id, technician_id } of newlyAddedForPush) {
+      const email = emailByTech.get(String(technician_id));
+      if (!email) continue;
+
+      const meta = projInfo.get(String(project_id)) ?? {
+        code: String(project_id).slice(0, 8).toUpperCase(),
+        customer: "",
+        site: "",
+      };
+
+      const bodyText =
+        `${meta.code}${meta.customer ? " • " + meta.customer : ""}` +
+        `${meta.site ? " — " + meta.site : ""}`;
+
+      await sendPushToEmails([email], {
+        title: "Kamu di-assign ke project baru",
+        body: bodyText.trim(),
+        url: `/user/dashboard?job=${encodeURIComponent(String(project_id))}`,
+        tag: `assign-${String(project_id)}`, // tag stabil per project
+      });
+    }
   }
+} catch (e) {
+  console.error("[assignments] push-notification error:", e);
+}
+
 
   return NextResponse.json(
     {
