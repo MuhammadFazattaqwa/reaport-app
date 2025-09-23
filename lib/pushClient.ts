@@ -1,223 +1,227 @@
-// src/lib/pushClient.ts
+// lib/pushClient.ts
 "use client";
 
-export type EnsureOptions = {
-  /** API endpoint untuk menyimpan subscription di server */
-  subscribeEndpoint?: string; // default: "/api/push/subscribe"
+import { supabase } from "@/lib/supabaseBrowser";
 
-  /** Bisa kirim email langsung... */
-  email?: string;
+/** ===================== Types ===================== **/
+export type EnsurePushOptions = {
+  /** Endpoint API untuk menyimpan/menautkan subscription di server (mis. "/api/push/subscribe") */
+  subscribeEndpoint: string;
+  /** Kembalikan email user saat ini (wajib untuk penautan user-subscription di server) */
+  getEmail: () => string;
 
-  /** ...atau ambil via callback saat runtime */
-  getEmail?: () => string | undefined;
-
-  /** Override VAPID public key (opsional). Default: process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY */
+  /** Opsional: override VAPID public key (Base64 URL-safe). Jika tidak diisi, ambil dari env */
   vapidPublicKey?: string;
 
-  /** Re-subscribe jika subscription lama tidak punya keys p256dh/auth */
-  resubscribeIfChanged?: boolean; // default: true
-
-  /** Callback ketika user menolak permission */
+  /** Callback saat user menolak izin */
   onDenied?: () => void;
-
-  /** Callback error operasional (network/subscribe) */
+  /** Callback saat ada error apapun */
   onError?: (e: unknown) => void;
+
+  /** Debug log ke console */
+  debug?: boolean;
 };
 
-type EnsureResult = {
-  ok: boolean;
-  reason?: string;
-  status?: number;
-};
+type SWRegistrationReady = ServiceWorkerRegistration;
 
-const DEFAULT_SUBSCRIBE_ENDPOINT = "/api/push/subscribe";
-
-/* =========================================================================
- * Utilities
- * ========================================================================= */
+/** ===================== Utils ===================== **/
+function log(debug: boolean | undefined, ...args: any[]) {
+  if (debug) console.debug("[pushClient]", ...args);
+}
 
 export function isPushSupported(): boolean {
-  if (typeof window === "undefined") return false;
   return (
+    typeof window !== "undefined" &&
     "serviceWorker" in navigator &&
     "PushManager" in window &&
     "Notification" in window
   );
 }
 
-/** Base64URL → Uint8Array */
-export function urlBase64ToUint8Array(base64Url: string): Uint8Array {
-  const padding = "=".repeat((4 - (base64Url.length % 4)) % 4);
-  const base64 = (base64Url + padding).replace(/-/g, "+").replace(/_/g, "/");
-  const raw =
-    typeof atob === "function"
-      ? atob(base64)
-      : Buffer.from(base64, "base64").toString("binary");
-  const out = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
-  return out;
+/**
+ * Base64 URL-safe -> Uint8Array<ArrayBuffer>
+ *
+ * Penting: kita membangun array dari **ArrayBuffer** secara eksplisit
+ * agar kompatibel dengan definisi DOM terbaru yang mengharuskan BufferSource
+ * berbasis ArrayBuffer, bukan sekadar ArrayBufferLike.
+ */
+function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const b64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+
+  // decode ke binary string
+  let raw: string;
+  if (typeof window !== "undefined" && typeof window.atob === "function") {
+    raw = window.atob(b64);
+  } else {
+    // fallback (jarang dipakai karena file ini "use client")
+    // @ts-ignore
+    raw = typeof Buffer !== "undefined" ? Buffer.from(b64, "base64").toString("binary") : atob(b64);
+  }
+
+  // buat ArrayBuffer -> Uint8Array dari raw
+  const len = raw.length;
+  const arrayBuffer = new ArrayBuffer(len); // <- ArrayBuffer asli (bukan ArrayBufferLike)
+  const output = new Uint8Array(arrayBuffer) as Uint8Array<ArrayBuffer>;
+  for (let i = 0; i < len; i++) {
+    output[i] = raw.charCodeAt(i);
+  }
+  return output;
 }
 
-/** Pastikan mengembalikan ArrayBuffer murni (bukan SharedArrayBuffer) */
-function toApplicationServerKeyBuffer(vapidPublicKey: string): ArrayBuffer {
-  const u8 = urlBase64ToUint8Array(vapidPublicKey);
-  const ab = new ArrayBuffer(u8.byteLength);
-  new Uint8Array(ab).set(u8);
-  return ab;
+/** Ambil VAPID public key dari opts/env (harus Base64 URL-safe) */
+function resolveVapidPublicKey(override?: string): string | undefined {
+  const fromGlobal =
+    (typeof globalThis !== "undefined" &&
+      ((globalThis as any).NEXT_PUBLIC_VAPID_PUBLIC_KEY ||
+        (globalThis as any).VAPID_PUBLIC_KEY)) ||
+    undefined;
+
+  const fromEnv =
+    (typeof process !== "undefined" &&
+      (process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY ||
+        process.env.VAPID_PUBLIC_KEY)) ||
+    undefined;
+
+  return override || fromGlobal || fromEnv || undefined;
 }
 
-/** SW registration yang sudah ready */
-async function getSWRegistration(): Promise<ServiceWorkerRegistration> {
-  if (!("serviceWorker" in navigator))
-    throw new Error("service worker not supported");
-  return navigator.serviceWorker.ready;
-}
-
-/** Permission saat ini */
-export async function getPermissionState(): Promise<NotificationPermission> {
-  if (typeof window === "undefined" || !("Notification" in window))
-    return "denied";
-  return Notification.permission;
-}
-
-/** Minta izin notifikasi jika belum granted */
-export async function requestNotificationPermission(): Promise<NotificationPermission> {
-  if (!("Notification" in window)) return "denied";
-  if (Notification.permission === "granted") return "granted";
-  return Notification.requestPermission();
-}
-
-/** Ambil subscription aktif (jika ada) */
-export async function getExistingSubscription(): Promise<PushSubscription | null> {
-  const reg = await getSWRegistration();
-  return reg.pushManager.getSubscription();
-}
-
-/** Unsubscribe (opsional: beritahu server di kemudian hari) */
-export async function unsubscribePush(removeFromServer = true): Promise<boolean> {
+/** Pastikan SW sudah siap; register '/sw.js' jika perlu */
+async function getSWReady(debug?: boolean): Promise<SWRegistrationReady> {
+  if (!isPushSupported()) throw new Error("Push/ServiceWorker tidak didukung browser ini.");
   try {
-    const sub = await getExistingSubscription();
-    if (!sub) return true;
-
-    // (Opsional) panggil API untuk hapus di server berdasarkan endpoint
-    if (removeFromServer) {
-      try {
-        const json = sub.toJSON();
-        const endpoint = json?.endpoint || sub.endpoint;
-        void endpoint; // placeholder kalau nanti mau dipakai
-        // await fetch("/api/push/unsubscribe", { ... });
-      } catch {
-        // abaikan error server-side removal
-      }
+    const ready = await navigator.serviceWorker.ready;
+    return ready;
+  } catch {
+    try {
+      log(debug, "Mencoba register service worker /sw.js");
+      await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+      return await navigator.serviceWorker.ready;
+    } catch (err) {
+      throw new Error("Gagal register Service Worker: " + (err as any)?.message);
     }
+  }
+}
 
-    return await sub.unsubscribe();
+/** Ambil subscription yang ada (jika sudah pernah subscribe) */
+export async function getExistingSubscription(): Promise<PushSubscription | null> {
+  if (!isPushSupported()) return null;
+  const reg = await navigator.serviceWorker.ready;
+  return await reg.pushManager.getSubscription();
+}
+
+/** Unsubscribe dari Push (jika ada) */
+export async function unsubscribePush(): Promise<boolean> {
+  const sub = await getExistingSubscription();
+  if (!sub) return true;
+  try {
+    const ok = await sub.unsubscribe();
+    return ok;
   } catch {
     return false;
   }
 }
 
-/* =========================================================================
- * ensurePushSubscription: pastikan ada subscription & simpan ke server
- * ========================================================================= */
-export async function ensurePushSubscription(options: EnsureOptions): Promise<EnsureResult> {
-  const {
-    subscribeEndpoint = DEFAULT_SUBSCRIBE_ENDPOINT,
-    onDenied,
-    onError,
-    resubscribeIfChanged = true,
-  } = options;
-
+/** ===================== Main: ensurePushSubscription ===================== **/
+/**
+ * Memastikan user:
+ * 1) Punya permission (minta izin bila "default")
+ * 2) Punya PushSubscription (buat kalau belum ada)
+ * 3) Subscription terkirim ke server (Authorization Bearer dari Supabase)
+ */
+export async function ensurePushSubscription(opts: EnsurePushOptions): Promise<PushSubscription> {
+  const { subscribeEndpoint, getEmail, onDenied, onError, vapidPublicKey, debug } = opts;
   try {
-    if (typeof window === "undefined") return { ok: false, reason: "ssr" };
-    if (!isPushSupported()) return { ok: false, reason: "unsupported" };
+    if (!isPushSupported()) throw new Error("Push/Notification tidak didukung di browser ini.");
 
-    // Ambil email dari opsi
-    const email =
-      (typeof options.email === "string" && options.email.trim()) ||
-      (typeof options.getEmail === "function"
-        ? (options.getEmail() || "").trim()
-        : "");
-
-    if (!email) return { ok: false, reason: "missing_user_email" };
-
-    // Ambil VAPID public key (opsi > env)
-    const vapidPublicKey =
-      options.vapidPublicKey ||
-      (process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY as string | undefined) ||
-      "";
-
-    if (!vapidPublicKey) return { ok: false, reason: "missing_vapid_key" };
+    const email = (getEmail?.() || "").trim();
+    if (!email) throw new Error("Email user kosong saat menyiapkan push subscription.");
 
     // 1) Permission
-    const permission = await requestNotificationPermission();
-    if (permission !== "granted") {
+    const currentPerm = Notification.permission; // "default" | "granted" | "denied"
+    log(debug, "Permission awal:", currentPerm);
+
+    if (currentPerm === "denied") {
       onDenied?.();
-      return { ok: false, reason: "permission_denied" };
+      throw new Error("User menolak notifikasi (permission = denied).");
     }
 
-    // 2) SW
-    const registration = await getSWRegistration();
-
-    // 3) Existing subscription
-    let subscription = await registration.pushManager.getSubscription();
-
-    // 4) Subscribe baru / resubscribe jika keys tidak lengkap
-    if (!subscription) {
-      subscription = await registration.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: toApplicationServerKeyBuffer(vapidPublicKey),
-      });
-    } else if (resubscribeIfChanged) {
-      const json: any = subscription.toJSON?.() ?? {};
-      const hasKeys = json?.keys?.p256dh && json?.keys?.auth;
-      if (!hasKeys) {
-        try {
-          await subscription.unsubscribe();
-        } catch {}
-        subscription = await registration.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: toApplicationServerKeyBuffer(vapidPublicKey),
-        });
+    if (currentPerm === "default") {
+      const newPerm = await Notification.requestPermission();
+      log(debug, "Permission setelah request:", newPerm);
+      if (newPerm !== "granted") {
+        if (newPerm === "denied") onDenied?.();
+        throw new Error("Izin notifikasi tidak diberikan.");
       }
     }
 
-    // 5) Upsert ke server: kirim { email, subscription, userAgent }
+    // 2) Service Worker ready
+    const reg = await getSWReady(debug);
+
+    // 3) Subscription
+    let sub = await reg.pushManager.getSubscription();
+    const vapidKey = resolveVapidPublicKey(vapidPublicKey);
+    if (!vapidKey) {
+      throw new Error(
+        "VAPID public key tidak ditemukan. Siapkan NEXT_PUBLIC_VAPID_PUBLIC_KEY atau isi opts.vapidPublicKey."
+      );
+    }
+
+    // Penting: gunakan UInt8Array<ArrayBuffer> agar type-nya cocok dengan BufferSource
+    const appServerKey = urlBase64ToUint8Array(vapidKey);
+
+    if (!sub) {
+      log(debug, "Belum ada subscription. Membuat baru…");
+      sub = await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: appServerKey, // <- kompatibel
+      });
+    } else {
+      log(debug, "Subscription sudah ada.");
+      // (opsional) bisa validasi & resubscribe jika perlu
+      // try { ... } catch { await sub.unsubscribe(); sub = await reg.pushManager.subscribe({...}); }
+    }
+
+    // 4) Kirim ke server (Authorization: Bearer dari Supabase)
+    const { data: s } = await supabase.auth.getSession();
+    const token = s?.session?.access_token;
+
+    const headers: Record<string, string> = {
+      "content-type": "application/json",
+    };
+    if (token) headers.Authorization = `Bearer ${token}`;
+
+    const payload = {
+      email,
+      subscription: (sub as any).toJSON ? (sub as any).toJSON() : sub,
+      userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "",
+    };
+
+    log(debug, "Mengirim subscription ke server:", subscribeEndpoint, payload);
+
     const res = await fetch(subscribeEndpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "same-origin",
-      body: JSON.stringify({
-        email,
-        subscription: subscription.toJSON?.() ?? subscription, // aman untuk server
-        userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "",
-      }),
+      headers,
+      credentials: "include",
+      body: JSON.stringify(payload),
     });
 
     if (!res.ok) {
-      return {
-        ok: false,
-        reason: "server_upsert_failed",
-        status: res.status,
-      };
+      const text = await res.text().catch(() => "");
+      if (res.status === 401) {
+        throw new Error(
+          `Unauthorized (401) saat menyimpan subscription. Pastikan server membaca Authorization Bearer dari header. Detail: ${text || "-"}`
+        );
+      }
+      throw new Error(`Gagal menyimpan subscription di server (status ${res.status}). ${text || ""}`);
     }
 
-    return { ok: true };
+    log(debug, "Subscription tersimpan di server ✅");
+    return sub;
   } catch (e) {
     onError?.(e);
-    return { ok: false, reason: `subscribe_failed: ${String((e as any)?.message || e)}` };
+    throw e;
   }
 }
 
-/** Helper satu baris untuk tombol “Aktifkan Notifikasi” */
-export async function enablePushNow(): Promise<EnsureResult> {
-  // Pakai env & email dari localStorage (kalau kamu simpan di sana).
-  // Silakan ganti strategi ambil email sesuai aplikasimu.
-  const email =
-    (typeof window !== "undefined" &&
-      (localStorage.getItem("userEmail") || "").trim()) ||
-    "";
-  return ensurePushSubscription({
-    email,
-  });
-}
+export default ensurePushSubscription;
