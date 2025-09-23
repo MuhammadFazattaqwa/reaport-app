@@ -4,7 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Card, CardContent } from "@/components/ui/card";
-import TechnicianHeader from "@/components/technician-header";
+import { TechnicianHeader } from "@/components/technician-header";
 import { Pagination } from "@/components/pagination";
 import { Star } from "lucide-react";
 import { PWAInstallPrompt } from "@/components/pwa-install-prompt";

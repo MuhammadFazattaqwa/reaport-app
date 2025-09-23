@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/lib/supabaseBrowser";
-import { ensurePushSubscription } from "@/lib/pushClient";
+import { ensurePushSubscription } from "@/lib/pushClient"; // pastikan file ini mengekspor named (lihat catatan di bawah)
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -21,16 +21,16 @@ import {
   Bell,
 } from "lucide-react";
 
-interface TechnicianHeaderProps {
+export type TechnicianHeaderProps = {
   title: string;
   showBackButton?: boolean;
   backUrl?: string;
   showFilter?: boolean;
   filterValue?: "all" | "survey" | "instalasi";
   onFilterChange?: (value: "all" | "survey" | "instalasi") => void;
-}
+};
 
-export default function TechnicianHeader({
+function TechnicianHeader({
   title,
   showBackButton = false,
   backUrl = "/user/dashboard",
@@ -41,7 +41,7 @@ export default function TechnicianHeader({
   const router = useRouter();
   const pathname = usePathname();
 
-  /* =================== Navigasi & logout =================== */
+  /* =================== Logout & navigasi =================== */
   async function handleLogout() {
     try {
       await supabase.auth.signOut();
@@ -55,15 +55,15 @@ export default function TechnicianHeader({
   const handleComplaintClick = () => router.push("/user/complain");
   const handleDamageComplainClick = () => router.push("/user/damageComplain");
 
-  /* =================== Info push & email =================== */
-  const supported = useMemo(() => {
-    return (
+  /* =================== Push Notification (guard & email) =================== */
+  const supported = useMemo(
+    () =>
       typeof window !== "undefined" &&
       "serviceWorker" in navigator &&
       "PushManager" in window &&
-      "Notification" in window
-    );
-  }, []);
+      "Notification" in window,
+    []
+  );
 
   const [email, setEmail] = useState<string | undefined>(undefined);
 
@@ -88,7 +88,7 @@ export default function TechnicianHeader({
     };
   }, []);
 
-  /* =================== Auto-prompt sekali saat di dashboard =================== */
+  /* =================== Auto-prompt sekali di dashboard =================== */
   const ranOnce = useRef(false);
   useEffect(() => {
     if (!supported) return;
@@ -125,7 +125,6 @@ export default function TechnicianHeader({
   /* =================== Floating Button (pojok kanan bawah) =================== */
   const [showFab, setShowFab] = useState(false);
 
-  // Tentukan kapan FAB tampil
   useEffect(() => {
     if (!supported) {
       setShowFab(false);
@@ -144,12 +143,10 @@ export default function TechnicianHeader({
           if (!cancelled) setShowFab(false);
           return;
         }
-        // default: tampil
         if (perm === "default") {
           if (!cancelled) setShowFab(true);
           return;
         }
-        // granted: tampil hanya jika belum ada subscription
         const reg = await navigator.serviceWorker.ready;
         const sub = await reg.pushManager.getSubscription();
         if (!cancelled) setShowFab(!sub);
@@ -164,7 +161,6 @@ export default function TechnicianHeader({
   }, [supported, pathname]);
 
   async function onFabClick() {
-    // Begitu tombol diklik, langsung sembunyikan
     setShowFab(false);
     try {
       await ensurePushSubscription({
@@ -172,7 +168,7 @@ export default function TechnicianHeader({
         getEmail: () => email!,
       });
     } catch {
-      // kalau gagal, biarkan saja tetap tersembunyi agar tidak mengganggu UX
+      // diamkan; user tetap bisa lanjut
     }
   }
 
@@ -195,6 +191,7 @@ export default function TechnicianHeader({
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Segmented filter (opsional) */}
             {showFilter && (
               <div className="flex items-center gap-1">
                 <Button
@@ -224,7 +221,7 @@ export default function TechnicianHeader({
               </div>
             )}
 
-            {/* Menu existing */}
+            {/* Menu */}
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="ghost" size="sm" className="p-2">
@@ -268,3 +265,6 @@ export default function TechnicianHeader({
     </>
   );
 }
+
+export default TechnicianHeader;
+export { TechnicianHeader };
