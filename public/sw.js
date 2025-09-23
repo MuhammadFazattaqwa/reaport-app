@@ -1,5 +1,5 @@
 /* public/sw.js — fast offline upload with timeout & ACK + Web Push (VAPID) */
-const VERSION = "magang-app-v1.0.56"; // ⬅️ bump versi agar SW baru aktif
+const VERSION = "magang-app-v1.0.57"; // ⬅️ bump versi agar SW baru aktif
 const STATIC_CACHE = VERSION + "-static";
 const DYNAMIC_CACHE = VERSION + "-dynamic";
 
